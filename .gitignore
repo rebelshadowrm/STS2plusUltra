@@ -1,0 +1,33 @@
+# Build output
+bin/
+obj/
+out/
+dist/
+
+# IDE / local tooling
+.vs/
+.omc/
+.claude/
+*.user
+*.suo
+*.userprefs
+*.DotSettings.user
+
+# Logs / local artifacts
+*.log
+*.tmp
+*.temp
+*.binlog
+
+# Packaged or copied binaries
+*.7z
+*.zip
+*.nupkg
+*.bak
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Optional local reference material
+references/EndlessModeRef/*.dll

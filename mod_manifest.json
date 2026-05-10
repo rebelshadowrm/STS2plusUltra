@@ -1,0 +1,11 @@
+{
+  "id": "STS2Plus",
+  "name": "STS2Plus",
+  "author": "4step",
+  "description": "Rules, combat tweaks, UI enhancements, and a DPS meter for Slay the Spire 2.",
+  "version": "0.2.0",
+  "has_dll": true,
+  "has_pck": false,
+  "dependencies": [],
+  "affects_gameplay": true
+}

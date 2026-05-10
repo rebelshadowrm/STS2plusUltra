@@ -1,0 +1,11 @@
+{
+  "id": "codex.sts2.endlessmode",
+  "name": "Codex Endless Mode",
+  "author": "Kaifo + Codex",
+  "version": "0.1.0",
+  "description": "Loops the run back to Act 1 after the last act and increases difficulty every cycle.",
+  "dependencies": [],
+  "has_dll": true,
+  "has_pck": false,
+  "affects_gameplay": true
+}
