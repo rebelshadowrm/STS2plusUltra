@@ -43,38 +43,59 @@ internal static class MyPatch
 
 ## AppliedTracker
 `STS2Plus.Features/AppliedTracker.cs` — prevents double-applying HP multipliers per creature.
-- `MarkGiantCreature(obj)` → returns true first time, false if already marked
-- `MarkHardElite(obj)` → same, separate set
-- `IsGiantCreature(obj)` → check without marking
+- `MarkGiantCreature(obj)` / `IsGiantCreature(obj)` — giant creatures set
+- `MarkHardElite(obj)` / `IsHardElite(obj)` — hard elites set
+- `MarkEndlessScaled(obj)` / `IsEndlessScaled(obj)` — endless HP scaling set
 - `Reset()` called on combat cleanup
 
 HP patches fire on `Creature.AfterAddedToRoom` and `Creature.BeforeCombatStart`. The mark prevents double-application across both calls. Two patches firing sequentially on the same call compose multiplicatively (second reads HP already modified by first).
 
-## HP Scaling — Confirmed Behavior
+## HP Scaling — Confirmed Behavior ✅
 - Giant Creatures only: all enemies ×2.0
 - Hard Elites only: elites ×1.5, others ×1.0
 - Both active: elites ×3.0 (2.0 × 1.5), regular enemies ×2.0
-- This is already correct in code — patches compose multiplicatively via sequential Postfix execution.
+- Correct in code — patches compose multiplicatively via sequential Postfix execution (separate `AppliedTracker` marks allow both to apply to the same creature).
 
-## Endless Mode Architecture
-**Flow**: Beat act 3 boss → `TheArchitect.WinRun` → `RunManager.WinRun` → `TriggerEndlessLoop` → `EnterAct(0, true)`.
+## Endless Mode Scaling (Act-Based) ✅
+All scaling anchors to `GetTotalActNumber()` = `loopCount * 3 + currentActIndex + 1`. Acts 1–3 are always unscaled (×1.0).
 
-Key patches:
-- `EndlessModeArchitectPatch` — blocks `TheArchitect.TriggerVictory` in endless mode
-- `EndlessModeArchitectWinRunPatch` — in multiplayer, defers to RunManager; in singleplayer, calls TriggerEndlessLoop directly
-- `EndlessModeWinRunPatch` — intercepts `RunManager.WinRun`; host calls TriggerEndlessLoop, clients return Task.CompletedTask
-- `EndlessModeKillPlayersPatch` — blocks `GuaranteeKillAllPlayers` during loop transition
-- `EndlessModeEnterActPatch` — Postfix on `EnterAct`, refreshes overlay
+**HP scaling** — `GameReflection.GetEndlessHpMultiplier()`:
+```
+1.33 ^ (actNumber - 3)
+```
+Act 4 = ×1.33, act 6 = ×2.35, act 9 = ×5.54, act 12 = ×13.0
 
-**`GameReflection.TriggerEndlessLoop(runManager)`** (in GameReflection.cs):
-1. Updates RNG seed to `{baseSeed}_L{loopCount+1}` (this is how loop count is tracked — parsed from seed string)
-2. Resets `CurrentActIndex = 0`, `ActFloor = 0`
-3. Calls `GenerateRooms()` (new map for new loop)
-4. Returns `EnterAct(0, true)` as Task (host awaits this; DO NOT add screen-clearing calls here — they break client sync)
+**Damage scaling** — `GameReflection.GetEndlessDamageMultiplier()`:
+```
+1.0 + (actNumber - 3) × 0.2
+```
+Act 4 = ×1.2, act 8 = ×2.0, act 13 = ×3.0
 
-**Multiplayer behavior**: `RunManager.WinRun` is only called on the HOST. Host's `TriggerEndlessLoop` → `EnterAct(0, true)` uses `NetLoadingHandle` to broadcast "load act 0" to clients. Clients must be in a receptive state when this broadcast arrives.
+**Damage patch** — `EndlessModeDamageScalingPatch.cs` patches `NCreature.PerformIntent`. Finds damage fields on the current intent via reflection (tries `_damage`, `_baseDamage`, `BaseDamage`, `Damage`, `_hitDamage`). Scales in Prefix, restores in Postfix. Verbose log shows whether fields were found — check if "no damage fields found" appears and report field names to fix.
 
-**Known fix (deployed, untested)**: Removed 3 `CloseSingleton`/`ClearSingleton` calls from `TriggerEndlessLoop` that were tearing down network event handlers before the `EnterAct` broadcast reached clients.
+**Vision**: infinite acts (act 4, 5, 6, 7... indefinitely), not looping back to act 1. Loop count/seed tracking is a current implementation detail, not the end goal.
+
+## Endless Mode Architecture — NEEDS PORT ⚠️
+The working reference implementation is in `C:\Games\Slay the spire 2 mods\EndlessModeRef\src\`. The current code in this repo uses an outdated approach that does NOT work in multiplayer.
+
+**Working approach (from reference mod):**
+- `RunManager.WinRun` is intercepted (returns false) → `EndlessLoopCoordinator.StartFromWinRunAsync`
+- Host broadcasts a custom `EndlessLoopBeginMessage` network message to all clients
+- Every player (host + clients) independently runs `EndlessLoopTransition.StartAsync` locally
+- `EndlessLoopTransition.StartAsync` serializes run → sanitizes save → revives dead players → rebuilds RunState → resets ALL multiplayer synchronizers → clears screens → calls `NGame.LoadRun`
+- `EndlessModeNeowOptionsPatch` + `EndlessModeNeowRoomPatch` fix Neow options on loop restart (sealed deck issue)
+- `EndlessLoopCoordinator.AttachCurrentRun()` called from `RunManager.Launch` Postfix to register the network message handler
+
+**Files to port from reference mod:**
+- `STS2Plus.Multiplayer/EndlessLoopBeginMessage.cs` — custom net message struct
+- `STS2Plus.Patches/EndlessLoopCoordinator.cs` — host/client coordination logic
+- `STS2Plus.Patches/EndlessLoopTransition.cs` — full transition (~400 lines, resets all multiplayer state)
+- `STS2Plus.Patches/EndlessMapSelectionParity.cs` — map selection sync helper
+- `STS2Plus.Patches/EndlessModeNeowOptionsPatch.cs` — fixes Neow options on loop restart
+- `STS2Plus.Patches/EndlessModeNeowRoomPatch.cs` — repairs Neow room if options are empty
+- Rewrite `EndlessModeWinRunPatch` — intercept WinRun, call coordinator
+- Rewrite `EndlessModeGameOverScreenPatch` — use `EndlessLoopCoordinator.BeginFromGameOverScreenAsync`
+- Add `EndlessLoopCoordinator.AttachCurrentRun()` to the `RunManager.Launch` Postfix patch
 
 ## Multiplayer Role Detection
 `MultiplayerReflection.cs` / `MultiplayerSafety.cs`:
@@ -86,15 +107,31 @@ Key patches:
 Stored in the RNG seed string: `baseSeed_L1`, `baseSeed_L2`, etc.
 `GameReflection.GetLoopCount()` parses `_L{n}` suffix. `GetTotalActNumber()` = `loopCount * 3 + currentActIndex + 1`.
 
-## Stun Threshold Scaling (GiantCreatures)
+## Stun Threshold Scaling ✅
 `GiantCreaturesStunThresholdPatch.cs` — patches `ConditionalBranchState.GetNextState`.
-For giant creatures, temporarily halves `_currentHp` and `_maxHp` before predicate evaluation so hardcoded HP thresholds (e.g. "stun at 231 HP") see vanilla-equivalent values. Restores original values in Postfix.
+Temporarily divides `_currentHp` and `_maxHp` by the **total HP multiplier** applied to that creature before predicate evaluation, so hardcoded thresholds (e.g. "stun at 231 HP") always fire at the correct percentage of HP. Restores original values in Postfix.
+
+Total multiplier is the product of whichever are active and marked on the creature:
+- Giant Creatures: ×2.0
+- Hard Elites: ×1.5
+- Endless mode: `GetEndlessHpMultiplier()` (act-based)
+
+Examples at act 9 (endless ×5.54):
+- Giant Creatures only: divides by ×2.0
+- Giant Creatures + Hard Elites (elite): divides by ×3.0
+- Giant Creatures + Endless: divides by ×11.1
+- All three on an elite: divides by ×16.6
+
 **Warning**: static field initializers in this class must null-check before calling `AccessTools.Field` — passing null type throws and crashes the entire MoreRules patch category. Use pattern: `CreatureType != null ? AccessTools.Field(CreatureType, "field") : null`.
 
+## Compact Relic Drawer ✅
+`STS2Plus.Ui/CompactRelicDrawer.cs` — a full Godot `Control` node that replaces the default relic display. Attached via `CompactRelicDrawerAttachPatch` on `NGlobalUi.Initialize` (Core category). Seven dedicated patches handle show/hide animations, immediate visibility toggling, potion navigation, and multiplayer layout. `CompactRelicDrawerMultiplayerPositionPatch` patches `NMultiplayerPlayerStateContainer.UpdatePosition` to fix the layout in 3-player runs (previously blocked top half of screen). Confirmed implemented and functional.
+
 ## Known Issues / Backlog
-- **Endless mode multiplayer** — fix deployed (removed screen-clear calls from TriggerEndlessLoop), not yet tested
+- **Endless mode multiplayer** ⚠️ — needs full port from reference mod (see Endless Mode Architecture section above). Current implementation broken in multiplayer.
+- **Sealed deck on loop restart** — Neow shows sealed deck on loop; fixed in reference mod via `EndlessModeNeowOptionsPatch` + `EndlessModeNeowRoomPatch` (part of the port).
 - **Damage cap scaling** — "clamshell boss" has 49-damage/turn cap that doesn't scale with modifiers. Needs investigation.
-- **Desync on room transition** — existed before mod, decided not to investigate blind
+- **Desync on room transition** — existed before mod, decided not to investigate blind.
 
 ## Game API Quick Reference
 Key types (all accessed via reflection):

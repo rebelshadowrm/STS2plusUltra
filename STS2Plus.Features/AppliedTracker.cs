@@ -29,9 +29,19 @@ internal static class AppliedTracker
 		return GiantCreatureSet.Add(RuntimeHelpers.GetHashCode(instance));
 	}
 
+	public static bool IsHardElite(object instance)
+	{
+		return HardEliteSet.Contains(RuntimeHelpers.GetHashCode(instance));
+	}
+
 	public static bool MarkHardElite(object instance)
 	{
 		return HardEliteSet.Add(RuntimeHelpers.GetHashCode(instance));
+	}
+
+	public static bool IsEndlessScaled(object instance)
+	{
+		return EndlessScaledSet.Contains(RuntimeHelpers.GetHashCode(instance));
 	}
 
 	public static bool MarkEndlessScaled(object instance)
