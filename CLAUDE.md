@@ -71,7 +71,12 @@ Act 4 = ×1.33, act 6 = ×2.35, act 9 = ×5.54, act 12 = ×13.0
 ```
 Act 4 = ×1.2, act 8 = ×2.0, act 13 = ×3.0
 
-**Damage patch** — `EndlessModeDamageScalingPatch.cs` patches `NCreature.PerformIntent`. Finds damage fields on the current intent via reflection (tries `_damage`, `_baseDamage`, `BaseDamage`, `Damage`, `_hitDamage`). Scales in Prefix, restores in Postfix. Verbose log shows whether fields were found — check if "no damage fields found" appears and report field names to fix.
+**Damage patch** — `EndlessModeDamageScalingPatch.cs` patches `AttackIntent.GetSingleDamage` (Postfix, `ref int __result`). This non-virtual base method is called once per hit for both single and multi-hit enemies:
+- `SingleAttackIntent.GetTotalDamage` → `GetSingleDamage` (1 call)
+- `MultiAttackIntent`: combat calls `GetSingleDamage` × `Repeats` per hit
+- `DamageCalc` (`Func<decimal>`) is display-only — do NOT patch it for actual damage
+
+Verbose log: `EndlessModeDamageScaling: GetSingleDamage {original} → {scaled} (x{mult})`
 
 **Vision**: infinite acts (act 4, 5, 6, 7... indefinitely), not looping back to act 1. Loop count/seed tracking is a current implementation detail, not the end goal.
 
@@ -142,8 +147,18 @@ Key types (all accessed via reflection):
 - `MegaCrit.Sts2.Core.Multiplayer.Game.MapSelectionSynchronizer` — `BeforeMapGenerated()`
 - `MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine.ConditionalBranchState` — `GetNextState(Creature, Rng)`
 
-## Probe Projects
-Throwaway C# console projects in `probe*/` directories to inspect game DLLs via `MetadataLoadContext`. These are excluded from the main build. Create via bash (not PowerShell — PowerShell creates `:TEMP` NTFS streams). Save important results to a text file rather than re-running each session.
+## Decompilation & API Reference
+
+### ilspycmd (preferred)
+Installed globally: `ilspycmd "...\sts2.dll" -t "Full.Type.Name"`
+Full path: `C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2\data_sts2_windows_x86_64\sts2.dll`
+Returns actual decompiled C# source — fastest way to understand any game type.
+
+### GAME_API.md
+Auto-generated from `probe_api/` — 480 types across 8 key namespaces. Run `dotnet run --project probe_api/probe_api.csproj` to regenerate after game updates.
+
+### Probe Projects
+Throwaway C# console projects in `probe*/` directories to inspect game DLLs via `MetadataLoadContext`. These are excluded from the main build. Create files directly with Write tool (not PowerShell — PowerShell creates `:TEMP` NTFS streams). Save important results to a text file rather than re-running each session.
 
 ## Log Searching
 When given a godot.log, search for `[STS2Plus]` to find mod-specific events. Key signals:
