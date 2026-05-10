@@ -14,11 +14,14 @@ using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.CommonUi;
+using MegaCrit.Sts2.Core.Nodes.Relics;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Saves.MapDrawing;
 using MegaCrit.Sts2.Core.Saves.Runs;
 using STS2Plus.Reflection;
+using STS2Plus.Ui;
 
 namespace STS2Plus.Patches;
 
@@ -350,6 +353,7 @@ internal static class EndlessLoopTransition
 
 	private static async Task EnsureVerifiedPostLoadStateAsync(NGame game, RunManager runManager, RunState runState, int loopIndex, string mapSeed)
 	{
+		TryCompletePostCleanupAfterValidAncientEvent(runManager, runState, "before post-load verification");
 		string verificationFailure = GetPostLoadVerificationFailure(runManager, runState);
 		if (string.IsNullOrEmpty(verificationFailure))
 		{
@@ -361,6 +365,7 @@ internal static class EndlessLoopTransition
 			await TryFinalizePostLoadMapStateAsync(game, runManager, runState, loopIndex, mapSeed);
 			runManager = RunManager.Instance ?? runManager;
 			runState = GetRunState(runManager) ?? runState;
+			TryCompletePostCleanupAfterValidAncientEvent(runManager, runState, "after multiplayer act finalization");
 			verificationFailure = GetPostLoadVerificationFailure(runManager, runState);
 		}
 		if (!string.IsNullOrEmpty(verificationFailure))
@@ -398,6 +403,7 @@ internal static class EndlessLoopTransition
 		RunManagerClearScreensMethod?.Invoke(refreshedManager, Array.Empty<object>());
 		ResetMultiplayerState(refreshedManager, refreshedState, loopIndex, mapSeed, "after multiplayer act finalization +1 frame");
 		SafeLogPlayerState(refreshedState, "after multiplayer act finalization +1 frame", loopIndex, mapSeed);
+		TryCompletePostCleanupAfterValidAncientEvent(refreshedManager, refreshedState, "after multiplayer act finalization +1 frame");
 	}
 
 	private static string GetPostLoadVerificationFailure(RunManager runManager, RunState runState)
@@ -421,9 +427,13 @@ internal static class EndlessLoopTransition
 		{
 			reasons.Add("room=MapRoom");
 		}
+		bool validLoopedAncientEvent = IsValidLoopedAncientEventState(runManager, runState);
 		if (EndlessLoopCoordinator.IsPostEndlessLoadCleanupActive)
 		{
-			reasons.Add("postCleanup=true");
+			if (!validLoopedAncientEvent)
+			{
+				reasons.Add("postCleanup=true");
+			}
 		}
 		if (reasons.Count == 0)
 		{
@@ -442,7 +452,12 @@ internal static class EndlessLoopTransition
 		string currentMapPoint = GameReflection.DescribeMapPoint(GameReflection.GetCurrentMapPoint());
 		object? currentScreen = AccessTools.Property(typeof(NGame), "CurrentScreen")?.GetValue(NGame.Instance);
 		bool mapVisible = string.Equals(currentScreen?.GetType().Name, "NMapScreen", StringComparison.Ordinal);
+		bool eventVisible = string.Equals(currentScreen?.GetType().Name, "NEventRoom", StringComparison.Ordinal) || string.Equals(currentRoom, "EventRoom", StringComparison.Ordinal);
 		ModEntry.Logger.Warn($"STS2Plus endless loop: post-load verification state failed={reasonText} room={currentRoom} mapPoint={currentMapPoint} mapLocation={runState.MapLocation} runLocation={runState.RunLocation} startedWithNeow={ReadStartedWithNeow(runState)} mapGen={runManager.MapSelectionSynchronizer?.MapGenerationCount ?? -1} votes={votes} bufferCurrent={bufferCurrent} postCleanup={EndlessLoopCoordinator.IsPostEndlessLoadCleanupActive} mapVisible={mapVisible}.", 1);
+		if (eventVisible)
+		{
+			LogEventInputState(runManager, runState, "post-load verification event-visible");
+		}
 	}
 
 	private static string ReadStartedWithNeow(RunState runState)
@@ -585,15 +600,18 @@ internal static class EndlessLoopTransition
 			return true;
 		}
 		LogEventInputState(runManager, runState, source + " before");
+		RefreshLoopedMultiplayerRelicUi(runState, source + " before");
 		if (EndlessLoopCoordinator.IsPostEndlessLoadCleanupActive)
 		{
 			ResetMultiplayerState(runManager, runState, GameReflection.GetLoopCount(), runState.Rng.StringSeed ?? "<null>", source + " cleanup");
 			TryResetActionQueueSet(runManager.ActionQueueSet);
 			TryPauseAndUnpauseActionExecutor(runManager.ActionExecutor);
 			ClearStaleChoiceAndRewardState(runManager);
-			EndlessLoopCoordinator.CompletePostEndlessLoadCleanup(source);
+			RefreshLoopedMultiplayerRelicUi(runState, source + " cleanup");
+			TryCompletePostCleanupAfterValidAncientEvent(runManager, runState, source);
 		}
 		LogEventInputState(runManager, runState, source + " after");
+		RefreshLoopedMultiplayerRelicUi(runState, source + " after");
 		string notReadyReason = GetLoopedEventInputNotReadyReason(runManager, runState);
 		if (!string.IsNullOrEmpty(notReadyReason))
 		{
@@ -623,7 +641,8 @@ internal static class EndlessLoopTransition
 		int pendingChoiceIds = CountCollection(PlayerChoiceSynchronizerChoiceIdsField?.GetValue(runManager.PlayerChoiceSynchronizer));
 		int pendingRewards = CountCollection(RewardsSetSynchronizerRewardsField?.GetValue(runManager.RewardsSetSynchronizer));
 		int pendingRewardIds = CountCollection(RewardsSetSynchronizerIdsField?.GetValue(runManager.RewardsSetSynchronizer));
-		ModEntry.Logger.Info($"STS2Plus endless loop: event input state {phase} postCleanup={EndlessLoopCoordinator.IsPostEndlessLoadCleanupActive} room={roomType} mapPoint={mapPoint} mapLocation={runState.MapLocation} runLocation={runState.RunLocation} bufferCurrent={bufferCurrent} mapGen={mapGenerationCount} acceptingVotesFromSource={acceptingVotes} queuedActions={queuedActions} actionExecutorPaused={executorPaused} pendingChoices={pendingChoices}/{pendingChoiceIds} pendingRewards={pendingRewards}/{pendingRewardIds} eventSync={eventState}.", 1);
+		string relicUi = DescribeRelicUiReadiness(runState);
+		ModEntry.Logger.Info($"STS2Plus endless loop: event input state {phase} postCleanup={EndlessLoopCoordinator.IsPostEndlessLoadCleanupActive} room={roomType} mapPoint={mapPoint} mapLocation={runState.MapLocation} runLocation={runState.RunLocation} bufferCurrent={bufferCurrent} mapGen={mapGenerationCount} acceptingVotesFromSource={acceptingVotes} queuedActions={queuedActions} actionExecutorPaused={executorPaused} pendingChoices={pendingChoices}/{pendingChoiceIds} pendingRewards={pendingRewards}/{pendingRewardIds} eventSync={eventState} relicUi={relicUi}.", 1);
 	}
 
 	private static string GetLoopedEventInputNotReadyReason(RunManager runManager, RunState runState)
@@ -662,6 +681,166 @@ internal static class EndlessLoopTransition
 			reasons.Add("eventOptionsMissing");
 		}
 		return string.Join(", ", reasons);
+	}
+
+	private static void TryCompletePostCleanupAfterValidAncientEvent(RunManager runManager, RunState runState, string source)
+	{
+		if (!EndlessLoopCoordinator.IsPostEndlessLoadCleanupActive)
+		{
+			return;
+		}
+		if (!IsValidLoopedAncientEventState(runManager, runState))
+		{
+			return;
+		}
+		EndlessLoopCoordinator.CompletePostEndlessLoadCleanup(source);
+		ModEntry.Logger.Info("STS2Plus endless loop: multiplayer loop postCleanup cleared after valid Ancient event finalization.", 1);
+	}
+
+	private static bool IsValidLoopedAncientEventState(RunManager runManager, RunState runState)
+	{
+		if (!GameReflection.IsMultiplayerRun() || GameReflection.GetLoopCount() <= 0)
+		{
+			return false;
+		}
+		string currentRoomType = GameReflection.GetCurrentRoom()?.GetType().Name ?? string.Empty;
+		MapPointType? currentMapPointType = GameReflection.GetCurrentMapPointType();
+		if (!string.Equals(currentRoomType, "EventRoom", StringComparison.Ordinal))
+		{
+			return false;
+		}
+		if (currentMapPointType != MapPointType.Ancient)
+		{
+			return false;
+		}
+		if (runState.MapLocation == null || runState.RunLocation == null)
+		{
+			return false;
+		}
+		if (CountCollection(ActionQueueRequestedActionsField?.GetValue(runManager.ActionQueueSynchronizer)) > 0)
+		{
+			return false;
+		}
+		if (CombatManagerStateField?.GetValue(CombatManager.Instance) != null)
+		{
+			return false;
+		}
+		if (!HasLiveEventOptionsForAllPlayers(runManager.EventSynchronizer, runState))
+		{
+			return false;
+		}
+		return true;
+	}
+
+	internal static bool IsLoopedMultiplayerAncientEventActive()
+	{
+		if (!GameReflection.IsMultiplayerRun() || GameReflection.GetLoopCount() <= 0)
+		{
+			return false;
+		}
+		string currentRoomType = GameReflection.GetCurrentRoom()?.GetType().Name ?? string.Empty;
+		return string.Equals(currentRoomType, "EventRoom", StringComparison.Ordinal) && GameReflection.GetCurrentMapPointType() == MapPointType.Ancient;
+	}
+
+	internal static void RefreshLoopedMultiplayerRelicUi(RunState? runState, string phase)
+	{
+		try
+		{
+			if (runState == null)
+			{
+				return;
+			}
+			NGlobalUi? globalUi = NRun.Instance?.GlobalUi;
+			if (globalUi != null)
+			{
+				CompactRelicDrawer.Attach(globalUi, runState);
+			}
+			ModEntry.Logger.Info("STS2Plus endless loop: looped multiplayer relic UI readiness: " + DescribeRelicUiReadiness(runState) + $" phase={phase}.", 1);
+		}
+		catch (Exception ex)
+		{
+			ModEntry.Logger.Warn("STS2Plus endless loop: failed to refresh relic UI - " + ex.Message, 1);
+		}
+	}
+
+	private static string DescribeRelicUiReadiness(RunState? runState)
+	{
+		try
+		{
+			List<string> playerIds = new List<string>();
+			foreach (Player player in runState?.Players ?? Array.Empty<Player>())
+			{
+				playerIds.Add(SafeGet(() => player.NetId.ToString(), "<unknown>"));
+			}
+			List<string> inventoryTargets = new List<string>();
+			int inventoryCount = 0;
+			Node? root = NRun.Instance?.GlobalUi;
+			if (root != null)
+			{
+				foreach (Node child in EnumerateDescendants(root))
+				{
+					if (child is NRelicInventory inventory)
+					{
+						inventoryCount++;
+						object? owner = AccessTools.Property(inventory.GetType(), "Player")?.GetValue(inventory) ?? AccessTools.Field(inventory.GetType(), "_player")?.GetValue(inventory) ?? AccessTools.Property(inventory.GetType(), "Owner")?.GetValue(inventory);
+						string target = owner == null ? "<unknown>" : (AccessTools.Property(owner.GetType(), "NetId")?.GetValue(owner)?.ToString() ?? owner.ToString() ?? "<unknown>");
+						inventoryTargets.Add(target);
+					}
+				}
+			}
+			List<string> missing = new List<string>();
+			foreach (string id in playerIds)
+			{
+				bool found = false;
+				foreach (string target in inventoryTargets)
+				{
+					if (string.Equals(target, id, StringComparison.Ordinal))
+					{
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+				{
+					missing.Add(id);
+				}
+			}
+			int panelCount = CountNamedNodes(root, "PlayerPanel") + CountNamedNodes(root, "MultiplayerPlayerState");
+			return $"players=[{string.Join(", ", playerIds)}] inventories={inventoryCount} inventoryTargets=[{string.Join(", ", inventoryTargets)}] playerPanels={panelCount} missing=[{string.Join(", ", missing)}]";
+		}
+		catch (Exception ex)
+		{
+			return "error=" + ex.GetType().Name + ":" + ex.Message;
+		}
+	}
+
+	private static int CountNamedNodes(Node? root, string nameFragment)
+	{
+		if (root == null)
+		{
+			return 0;
+		}
+		int count = 0;
+		foreach (Node child in EnumerateDescendants(root))
+		{
+			if (child.GetType().Name.Contains(nameFragment, StringComparison.Ordinal))
+			{
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private static IEnumerable<Node> EnumerateDescendants(Node root)
+	{
+		foreach (Node child in root.GetChildren())
+		{
+			yield return child;
+			foreach (Node descendant in EnumerateDescendants(child))
+			{
+				yield return descendant;
+			}
+		}
 	}
 
 	private static bool HasLiveEventOptionsForAllPlayers(EventSynchronizer? synchronizer, RunState runState)

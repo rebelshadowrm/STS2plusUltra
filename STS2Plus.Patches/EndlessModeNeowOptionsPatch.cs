@@ -6,6 +6,8 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Random;
 using STS2Plus.Reflection;
 
 namespace STS2Plus.Patches;
@@ -23,6 +25,19 @@ internal static class EndlessModeNeowOptionsPatch
 		public int LoopCount { get; init; }
 	}
 
+	private sealed class LoopedNeowRngState
+	{
+		public required object OriginalRng { get; init; }
+
+		public required string SourceBaseSeed { get; init; }
+
+		public required string PlayerKey { get; init; }
+
+		public required uint ResolvedSeed { get; init; }
+
+		public int LoopCount { get; init; }
+	}
+
 	private sealed class ReplacementOptionState
 	{
 		public int LoopCount { get; init; }
@@ -31,6 +46,8 @@ internal static class EndlessModeNeowOptionsPatch
 	}
 
 	private static readonly ConditionalWeakTable<object, SuppressedModifierState> SuppressedModifierStates = new ConditionalWeakTable<object, SuppressedModifierState>();
+
+	private static readonly ConditionalWeakTable<object, LoopedNeowRngState> LoopedNeowRngStates = new ConditionalWeakTable<object, LoopedNeowRngState>();
 
 	private static readonly ConditionalWeakTable<EventOption, ReplacementOptionState> ReplacementOptions = new ConditionalWeakTable<EventOption, ReplacementOptionState>();
 
@@ -43,6 +60,7 @@ internal static class EndlessModeNeowOptionsPatch
 
 	private static void Prefix(object __instance)
 	{
+		TryApplyLoopedDeterministicNeowRng(__instance);
 		if (ShouldTemporarilySuppressModifierOptions(__instance, out int loopCount, out IList? modifiersList))
 		{
 			List<object?> snapshot = new List<object?>();
@@ -64,44 +82,51 @@ internal static class EndlessModeNeowOptionsPatch
 
 	private static void Postfix(object __instance, ref IReadOnlyList<EventOption> __result)
 	{
-		if (TryRestoreSuppressedModifiers(__instance, out SuppressedModifierState? suppressedState))
+		try
 		{
-			ModEntry.Logger.Info($"EndlessModeNeowOptions: restored modifier list after multiplayer loopIndex={suppressedState.LoopCount} generatedCount={__result?.Count ?? 0}.", 1);
-			LogGeneratedOptionKeys(__instance, __result, "live-or-reload");
-			if ((__result?.Count ?? 0) > 0)
+			if (TryRestoreSuppressedModifiers(__instance, out SuppressedModifierState? suppressedState))
 			{
+				ModEntry.Logger.Info($"EndlessModeNeowOptions: restored modifier list after multiplayer loopIndex={suppressedState.LoopCount} generatedCount={__result?.Count ?? 0}.", 1);
+				LogGeneratedOptionKeys(__instance, __result, "live-or-reload");
+				if ((__result?.Count ?? 0) > 0)
+				{
+					return;
+				}
+				if (TryRestoreLoopContinuationNeowOptions(__instance, out IReadOnlyList<EventOption> fallbackAfterSuppression, "multiplayer-fallback"))
+				{
+					__result = fallbackAfterSuppression;
+					ModEntry.Logger.Warn($"EndlessModeNeowOptions: multiplayer normal generation returned no options, using fallback loopIndex={suppressedState.LoopCount} replacementCount={fallbackAfterSuppression.Count}.", 1);
+				}
 				return;
 			}
-			if (TryRestoreLoopContinuationNeowOptions(__instance, out IReadOnlyList<EventOption> fallbackAfterSuppression, "multiplayer-fallback"))
+			if (PlusState.IsEndlessModeActive())
 			{
-				__result = fallbackAfterSuppression;
-				ModEntry.Logger.Warn($"EndlessModeNeowOptions: multiplayer normal generation returned no options, using fallback loopIndex={suppressedState.LoopCount} replacementCount={fallbackAfterSuppression.Count}.", 1);
+				if (ShouldSkipLoopedNeowHandling(out int loopCount, out bool trueNewRun))
+				{
+					if (TryRestoreLoopContinuationNeowOptions(__instance, out IReadOnlyList<EventOption> replacement, "singleplayer-fallback"))
+					{
+						__result = replacement;
+						ModEntry.Logger.Info($"EndlessModeNeowOptions skipped modifier options because loopIndex > 0 loopIndex={loopCount} trueNewRun={trueNewRun} replacementCount={replacement.Count}.", 1);
+						LogGeneratedOptionKeys(__instance, __result, "singleplayer-fallback");
+					}
+					else
+					{
+						ModEntry.Logger.Warn($"EndlessModeNeowOptions could not replace modifier options on loop continuation loopIndex={loopCount} trueNewRun={trueNewRun}.", 1);
+					}
+					return;
+				}
+				ModEntry.Verbose($"EndlessModeNeowOptions: replacing Neow options count={__result?.Count ?? 0}");
+				EnsureStartedWithNeowFlag();
+				if ((__result?.Count ?? 0) <= 0 && TryRestoreNeowOptions(__instance, out IReadOnlyList<EventOption> fallback))
+				{
+					__result = fallback;
+				}
+				LogGeneratedOptionKeys(__instance, __result, "default");
 			}
-			return;
 		}
-		if (PlusState.IsEndlessModeActive())
+		finally
 		{
-			if (ShouldSkipLoopedNeowHandling(out int loopCount, out bool trueNewRun))
-			{
-				if (TryRestoreLoopContinuationNeowOptions(__instance, out IReadOnlyList<EventOption> replacement, "singleplayer-fallback"))
-				{
-					__result = replacement;
-					ModEntry.Logger.Info($"EndlessModeNeowOptions skipped modifier options because loopIndex > 0 loopIndex={loopCount} trueNewRun={trueNewRun} replacementCount={replacement.Count}.", 1);
-					LogGeneratedOptionKeys(__instance, __result, "singleplayer-fallback");
-				}
-				else
-				{
-					ModEntry.Logger.Warn($"EndlessModeNeowOptions could not replace modifier options on loop continuation loopIndex={loopCount} trueNewRun={trueNewRun}.", 1);
-				}
-				return;
-			}
-			ModEntry.Verbose($"EndlessModeNeowOptions: replacing Neow options count={__result?.Count ?? 0}");
-			EnsureStartedWithNeowFlag();
-			if ((__result?.Count ?? 0) <= 0 && TryRestoreNeowOptions(__instance, out IReadOnlyList<EventOption> fallback))
-			{
-				__result = fallback;
-			}
-			LogGeneratedOptionKeys(__instance, __result, "default");
+			RestoreLoopedDeterministicNeowRng(__instance);
 		}
 	}
 
@@ -655,11 +680,241 @@ internal static class EndlessModeNeowOptionsPatch
 					textKeys.Add(AccessTools.Property(option.GetType(), "TextKey")?.GetValue(option)?.ToString() ?? "<null>");
 				}
 			}
+			if (LoopedNeowRngStates.TryGetValue(neow, out LoopedNeowRngState? value) && value != null)
+			{
+				ModEntry.Logger.Info($"LoopedNeowRng sourceBaseSeed={value.SourceBaseSeed} loopIndex={value.LoopCount} player={value.PlayerKey} resolvedSeed={value.ResolvedSeed} optionTextKeys=[{string.Join(", ", textKeys)}].", 1);
+			}
 			ModEntry.Logger.Info($"EndlessModeNeowOptions: generated options source={generationSource} player={player ?? "<null>"} loopIndex={GameReflection.GetLoopCount()} mapSeed={seed} event=NEOW optionTextKeys=[{string.Join(", ", textKeys)}].", 1);
 		}
 		catch (Exception ex)
 		{
 			ModEntry.Logger.Warn("EndlessModeNeowOptions: failed to log option keys - " + ex.Message, 1);
 		}
+	}
+
+	private static void TryApplyLoopedDeterministicNeowRng(object neow)
+	{
+		if (!PlusState.IsEndlessModeActive())
+		{
+			return;
+		}
+		int loopCount = GameReflection.GetLoopCount();
+		if (loopCount <= 0 || !GameReflection.IsMultiplayerRun())
+		{
+			return;
+		}
+		if (LoopedNeowRngStates.TryGetValue(neow, out _))
+		{
+			return;
+		}
+		object? owner = AccessTools.Property(neow.GetType(), "Owner")?.GetValue(neow);
+		object? runState = owner == null ? null : AccessTools.Property(owner.GetType(), "RunState")?.GetValue(owner);
+		if (owner == null || runState == null)
+		{
+			return;
+		}
+		string sourceBaseSeed = GetBaseSeedString(runState);
+		string playerKey = GetLoopedNeowPlayerKey(owner, runState);
+		uint resolvedSeed = StableHashToUInt32(sourceBaseSeed + "|loop=" + loopCount + "|player=" + playerKey + "|event=NEOW|salt=STS2Plus.LoopedNeowOptions");
+		object? rng = ReadRng(neow);
+		if (rng == null)
+		{
+			ModEntry.Logger.Warn($"LoopedNeowRng could not read live Neow RNG loopIndex={loopCount} player={playerKey}.", 1);
+			return;
+		}
+		object? replacementRng = CreateRng(resolvedSeed, loopCount, playerKey, sourceBaseSeed);
+		if (replacementRng == null)
+		{
+			ModEntry.Logger.Warn($"LoopedNeowRng could not create deterministic RNG loopIndex={loopCount} player={playerKey} resolvedSeed={resolvedSeed}.", 1);
+			return;
+		}
+		if (!TryWriteRng(neow, replacementRng, out string targetMember, out string writeError))
+		{
+			ModEntry.Logger.Warn($"LoopedNeowRng could not assign deterministic RNG loopIndex={loopCount} player={playerKey} resolvedSeed={resolvedSeed} target={targetMember} error={writeError}.", 1);
+			return;
+		}
+		LoopedNeowRngStates.Remove(neow);
+		LoopedNeowRngStates.Add(neow, new LoopedNeowRngState
+		{
+			OriginalRng = rng,
+			SourceBaseSeed = sourceBaseSeed,
+			PlayerKey = playerKey,
+			ResolvedSeed = resolvedSeed,
+			LoopCount = loopCount
+		});
+		ModEntry.Logger.Info($"LoopedNeowRng prepared sourceBaseSeed={sourceBaseSeed} loopIndex={loopCount} player={playerKey} resolvedSeed={resolvedSeed} appliedType={replacementRng.GetType().FullName} target={targetMember}.", 1);
+	}
+
+	private static void RestoreLoopedDeterministicNeowRng(object neow)
+	{
+		if (!LoopedNeowRngStates.TryGetValue(neow, out LoopedNeowRngState? value) || value == null)
+		{
+			return;
+		}
+		LoopedNeowRngStates.Remove(neow);
+		if (!TryWriteRng(neow, value.OriginalRng, out string targetMember, out string writeError))
+		{
+			ModEntry.Logger.Warn($"LoopedNeowRng failed to restore original RNG loopIndex={value.LoopCount} player={value.PlayerKey} resolvedSeed={value.ResolvedSeed} target={targetMember} error={writeError}.", 1);
+		}
+	}
+
+	private static object? ReadRng(object target)
+	{
+		for (Type? type = target.GetType(); type != null; type = type.BaseType)
+		{
+			PropertyInfo? propertyInfo = type.GetProperty("Rng", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+			if (propertyInfo != null)
+			{
+				try
+				{
+					return propertyInfo.GetValue(target);
+				}
+				catch
+				{
+				}
+			}
+			FieldInfo? fieldInfo = type.GetField("<Rng>k__BackingField", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly) ?? type.GetField("_rng", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly) ?? type.GetField("Rng", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+			if (fieldInfo != null)
+			{
+				try
+				{
+					return fieldInfo.GetValue(target);
+				}
+				catch
+				{
+				}
+			}
+		}
+		return null;
+	}
+
+	private static bool TryWriteRng(object target, object rng, out string targetMember, out string writeError)
+	{
+		targetMember = "<none>";
+		writeError = string.Empty;
+		for (Type? type = target.GetType(); type != null; type = type.BaseType)
+		{
+			PropertyInfo? propertyInfo = type.GetProperty("Rng", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+			if (propertyInfo != null && propertyInfo.CanWrite)
+			{
+				try
+				{
+					propertyInfo.SetValue(target, rng);
+					targetMember = type.FullName + ".Rng";
+					return true;
+				}
+				catch (Exception ex)
+				{
+					targetMember = type.FullName + ".Rng";
+					writeError = ex.GetType().Name + ": " + ex.Message;
+				}
+			}
+			FieldInfo? fieldInfo = type.GetField("<Rng>k__BackingField", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly) ?? type.GetField("_rng", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly) ?? type.GetField("Rng", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+			if (fieldInfo != null)
+			{
+				try
+				{
+					fieldInfo.SetValue(target, rng);
+					targetMember = type.FullName + "." + fieldInfo.Name;
+					return true;
+				}
+				catch (Exception ex2)
+				{
+					targetMember = type.FullName + "." + fieldInfo.Name;
+					writeError = ex2.GetType().Name + ": " + ex2.Message;
+				}
+			}
+		}
+		if (string.IsNullOrEmpty(writeError))
+		{
+			writeError = "no writable Rng property or field found";
+		}
+		return false;
+	}
+
+	private static object? CreateRng(uint resolvedSeed, int loopCount, string playerKey, string sourceBaseSeed)
+	{
+		try
+		{
+			Rng rng = new Rng(resolvedSeed);
+			return rng;
+		}
+		catch (Exception ex)
+		{
+			ModEntry.Logger.Warn($"LoopedNeowRng create failed sourceBaseSeed={sourceBaseSeed} loopIndex={loopCount} player={playerKey} resolvedSeed={resolvedSeed}: {ex}", 1);
+			return null;
+		}
+	}
+
+	private static string GetBaseSeedString(object runState)
+	{
+		object? value = AccessTools.Property(runState.GetType(), "Rng")?.GetValue(runState);
+		string text = value?.GetType().GetProperty("StringSeed")?.GetValue(value)?.ToString() ?? "STS2PLUS";
+		text = SeedHelper.CanonicalizeSeed(text);
+		int num = text.LastIndexOf("_L", StringComparison.Ordinal);
+		if (num > 0 && num + 2 < text.Length)
+		{
+			bool flag = true;
+			for (int i = num + 2; i < text.Length; i++)
+			{
+				if (!char.IsDigit(text[i]))
+				{
+					flag = false;
+					break;
+				}
+			}
+			if (flag)
+			{
+				return text.Substring(0, num);
+			}
+		}
+		return text;
+	}
+
+	private static string GetLoopedNeowPlayerKey(object owner, object runState)
+	{
+		object? value = AccessTools.Property(owner.GetType(), "NetId")?.GetValue(owner);
+		string text = value?.ToString() ?? "<null>";
+		int num = GetPlayerSlotIndex(owner, runState);
+		return $"slot={num};netId={text}";
+	}
+
+	private static int GetPlayerSlotIndex(object owner, object runState)
+	{
+		if (!(AccessTools.Property(runState.GetType(), "Players")?.GetValue(runState) is IEnumerable enumerable))
+		{
+			return -1;
+		}
+		int num = 0;
+		object? value = AccessTools.Property(owner.GetType(), "NetId")?.GetValue(owner);
+		foreach (object item in enumerable)
+		{
+			if (ReferenceEquals(item, owner))
+			{
+				return num;
+			}
+			object? value2 = AccessTools.Property(item.GetType(), "NetId")?.GetValue(item);
+			if (value != null && value.Equals(value2))
+			{
+				return num;
+			}
+			num++;
+		}
+		return -1;
+	}
+
+	private static uint StableHashToUInt32(string value)
+	{
+		uint num = 2166136261u;
+		for (int i = 0; i < value.Length; i++)
+		{
+			num ^= value[i];
+			num *= 16777619;
+		}
+		if (num == 0)
+		{
+			return 2166136261u;
+		}
+		return num;
 	}
 }
