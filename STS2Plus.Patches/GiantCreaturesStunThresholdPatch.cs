@@ -39,7 +39,19 @@ internal static class GiantCreaturesStunThresholdPatch
 		__state = null;
 		if (__0 == null || CurrentHpField == null || MaxHpField == null)
 			return;
-		if (!PlusState.IsGiantCreaturesActive() || !GameReflection.IsEnemyCreature(__0) || !AppliedTracker.IsGiantCreature(__0))
+		if (!GameReflection.IsEnemyCreature(__0))
+			return;
+
+		// Build the total HP multiplier actually applied to this creature.
+		decimal totalMultiplier = 1.0m;
+		if (PlusState.IsGiantCreaturesActive() && AppliedTracker.IsGiantCreature(__0))
+			totalMultiplier *= 2.0m;
+		if (PlusState.IsHardElitesActive() && AppliedTracker.IsHardElite(__0))
+			totalMultiplier *= 1.5m;
+		if (PlusState.IsEndlessModeActive() && AppliedTracker.IsEndlessScaled(__0))
+			totalMultiplier *= GameReflection.GetEndlessHpMultiplier();
+
+		if (totalMultiplier <= 1.0m)
 			return;
 
 		int hp = (int)CurrentHpField.GetValue(__0)!;
@@ -48,8 +60,8 @@ internal static class GiantCreaturesStunThresholdPatch
 			return;
 
 		__state = (hp, maxHp);
-		CurrentHpField.SetValue(__0, Math.Max(1, hp / 2));
-		MaxHpField.SetValue(__0, Math.Max(1, maxHp / 2));
+		CurrentHpField.SetValue(__0, Math.Max(1, (int)Math.Round(hp / totalMultiplier, MidpointRounding.AwayFromZero)));
+		MaxHpField.SetValue(__0, Math.Max(1, (int)Math.Round(maxHp / totalMultiplier, MidpointRounding.AwayFromZero)));
 	}
 
 	private static void Postfix(object? __0, (int hp, int maxHp)? __state)

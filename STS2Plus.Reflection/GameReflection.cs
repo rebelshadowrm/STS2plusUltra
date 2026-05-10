@@ -1495,19 +1495,18 @@ internal static class GameReflection
 	{
 		int totalActNumber = GetTotalActNumber();
 		if (totalActNumber <= 3)
-		{
 			return 1.0m;
-		}
-		int loopCount = GetLoopCount();
-		if (loopCount <= 0)
-		{
-			return 1.0m;
-		}
 		int num = totalActNumber - 3;
-		decimal num2 = (decimal)Math.Pow(1.55, loopCount);
-		decimal num3 = 1.0m + (decimal)num * 0.18m;
-		decimal num4 = ((loopCount <= 1) ? 1.0m : (1.0m + (decimal)(loopCount - 1) * 0.12m));
-		return num2 * num3 * num4;
+		return (decimal)Math.Pow(1.33, num);
+	}
+
+	public static decimal GetEndlessDamageMultiplier()
+	{
+		int totalActNumber = GetTotalActNumber();
+		if (totalActNumber <= 3)
+			return 1.0m;
+		int num = totalActNumber - 3;
+		return 1.0m + (decimal)num * 0.2m;
 	}
 
 	public static bool ShouldStartEndlessLoop(object? runManager)
