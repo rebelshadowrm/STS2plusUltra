@@ -67,6 +67,7 @@ internal static class EndlessModeNeowOptionsPatch
 		if (TryRestoreSuppressedModifiers(__instance, out SuppressedModifierState? suppressedState))
 		{
 			ModEntry.Logger.Info($"EndlessModeNeowOptions: restored modifier list after multiplayer loopIndex={suppressedState.LoopCount} generatedCount={__result?.Count ?? 0}.", 1);
+			LogGeneratedOptionKeys(__instance, __result, "live-or-reload");
 			if ((__result?.Count ?? 0) > 0)
 			{
 				return;
@@ -86,6 +87,7 @@ internal static class EndlessModeNeowOptionsPatch
 				{
 					__result = replacement;
 					ModEntry.Logger.Info($"EndlessModeNeowOptions skipped modifier options because loopIndex > 0 loopIndex={loopCount} trueNewRun={trueNewRun} replacementCount={replacement.Count}.", 1);
+					LogGeneratedOptionKeys(__instance, __result, "singleplayer-fallback");
 				}
 				else
 				{
@@ -99,6 +101,7 @@ internal static class EndlessModeNeowOptionsPatch
 			{
 				__result = fallback;
 			}
+			LogGeneratedOptionKeys(__instance, __result, "default");
 		}
 	}
 
@@ -634,5 +637,29 @@ internal static class EndlessModeNeowOptionsPatch
 		loopCount = GameReflection.GetLoopCount();
 		trueNewRun = loopCount <= 0;
 		return loopCount > 0;
+	}
+
+	private static void LogGeneratedOptionKeys(object neow, IReadOnlyList<EventOption>? options, string generationSource)
+	{
+		try
+		{
+			object? owner = AccessTools.Property(neow.GetType(), "Owner")?.GetValue(neow);
+			object? player = owner == null ? null : AccessTools.Property(owner.GetType(), "NetId")?.GetValue(owner);
+			object? runState = owner == null ? null : AccessTools.Property(owner.GetType(), "RunState")?.GetValue(owner);
+			string seed = (runState == null) ? "<null>" : (AccessTools.Property(runState.GetType(), "Rng")?.GetValue(runState)?.GetType().GetProperty("StringSeed")?.GetValue(AccessTools.Property(runState.GetType(), "Rng")?.GetValue(runState))?.ToString() ?? "<null>");
+			List<string> textKeys = new List<string>();
+			if (options != null)
+			{
+				foreach (EventOption option in options)
+				{
+					textKeys.Add(AccessTools.Property(option.GetType(), "TextKey")?.GetValue(option)?.ToString() ?? "<null>");
+				}
+			}
+			ModEntry.Logger.Info($"EndlessModeNeowOptions: generated options source={generationSource} player={player ?? "<null>"} loopIndex={GameReflection.GetLoopCount()} mapSeed={seed} event=NEOW optionTextKeys=[{string.Join(", ", textKeys)}].", 1);
+		}
+		catch (Exception ex)
+		{
+			ModEntry.Logger.Warn("EndlessModeNeowOptions: failed to log option keys - " + ex.Message, 1);
+		}
 	}
 }
