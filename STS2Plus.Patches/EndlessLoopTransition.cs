@@ -92,6 +92,34 @@ internal static class EndlessLoopTransition
 
 	private static readonly PropertyInfo? SerializableRunExtraFieldsProperty = AccessTools.Property(typeof(SerializableRun), "ExtraFields");
 
+	private static readonly PropertyInfo? ActionExecutorIsPausedProperty = AccessTools.Property(typeof(RunManager).Assembly.GetType("MegaCrit.Sts2.Core.GameActions.ActionExecutor"), "IsPaused");
+
+	private static readonly MethodInfo? ActionExecutorPauseMethod = AccessTools.Method(typeof(RunManager).Assembly.GetType("MegaCrit.Sts2.Core.GameActions.ActionExecutor"), "Pause", Type.EmptyTypes, null);
+
+	private static readonly MethodInfo? ActionExecutorUnpauseMethod = AccessTools.Method(typeof(RunManager).Assembly.GetType("MegaCrit.Sts2.Core.GameActions.ActionExecutor"), "Unpause", Type.EmptyTypes, null);
+
+	private static readonly MethodInfo? ActionQueueSetResetMethod = AccessTools.Method(typeof(RunManager).Assembly.GetType("MegaCrit.Sts2.Core.GameActions.ActionQueueSet"), "Reset", Type.EmptyTypes, null);
+
+	private static readonly PropertyInfo? EventSynchronizerEventsProperty = AccessTools.Property(typeof(EventSynchronizer), "Events");
+
+	private static readonly FieldInfo? EventSynchronizerEventsField = AccessTools.Field(typeof(EventSynchronizer), "_events");
+
+	private static readonly PropertyInfo? EventSynchronizerIsSharedProperty = AccessTools.Property(typeof(EventSynchronizer), "IsShared");
+
+	private static readonly FieldInfo? EventSynchronizerVotesField = AccessTools.Field(typeof(EventSynchronizer), "_playerVotes");
+
+	private static readonly FieldInfo? EventSynchronizerPageIndexField = AccessTools.Field(typeof(EventSynchronizer), "_pageIndex");
+
+	private static readonly MethodInfo? EventSynchronizerGetLocalEventMethod = AccessTools.Method(typeof(EventSynchronizer), "GetLocalEvent", Type.EmptyTypes, null);
+
+	private static readonly FieldInfo? PlayerChoiceSynchronizerChoicesField = AccessTools.Field(typeof(RunManager).Assembly.GetType("MegaCrit.Sts2.Core.Multiplayer.Game.PlayerChoiceSynchronizer"), "_choices");
+
+	private static readonly FieldInfo? PlayerChoiceSynchronizerChoiceIdsField = AccessTools.Field(typeof(RunManager).Assembly.GetType("MegaCrit.Sts2.Core.Multiplayer.Game.PlayerChoiceSynchronizer"), "_choiceIdByPlayer");
+
+	private static readonly FieldInfo? RewardsSetSynchronizerRewardsField = AccessTools.Field(typeof(RunManager).Assembly.GetType("MegaCrit.Sts2.Core.Multiplayer.Game.RewardsSetSynchronizer"), "_rewardsSets");
+
+	private static readonly FieldInfo? RewardsSetSynchronizerIdsField = AccessTools.Field(typeof(RunManager).Assembly.GetType("MegaCrit.Sts2.Core.Multiplayer.Game.RewardsSetSynchronizer"), "_rewardsSetIdByPlayer");
+
 	public static async Task StartAsync(Node? screen, int nextLoopIndex, string nextSeed)
 	{
 		RunManager runManager = RunManager.Instance ?? throw new InvalidOperationException("STS2Plus endless loop: RunManager.Instance is null.");
@@ -546,6 +574,194 @@ internal static class EndlessLoopTransition
 		ResetMultiplayerState(runManager, runState, GameReflection.GetLoopCount(), runState.Rng.StringSeed ?? "<null>", source);
 		SafeLogPlayerState(runState, source, GameReflection.GetLoopCount(), runState.Rng.StringSeed ?? "<null>");
 		ModEntry.Logger.Info("STS2Plus endless loop: applied final multiplayer reset before first endless combat.", 1);
+	}
+
+	internal static bool PrepareLoopedMultiplayerEventInputIfNeeded(string source)
+	{
+		RunManager? runManager = RunManager.Instance;
+		RunState? runState = runManager?.DebugOnlyGetState() ?? (runManager == null ? null : GetRunState(runManager));
+		if (runManager == null || runState == null || !GameReflection.IsMultiplayerRun() || GameReflection.GetLoopCount() <= 0)
+		{
+			return true;
+		}
+		LogEventInputState(runManager, runState, source + " before");
+		if (EndlessLoopCoordinator.IsPostEndlessLoadCleanupActive)
+		{
+			ResetMultiplayerState(runManager, runState, GameReflection.GetLoopCount(), runState.Rng.StringSeed ?? "<null>", source + " cleanup");
+			TryResetActionQueueSet(runManager.ActionQueueSet);
+			TryPauseAndUnpauseActionExecutor(runManager.ActionExecutor);
+			ClearStaleChoiceAndRewardState(runManager);
+			EndlessLoopCoordinator.CompletePostEndlessLoadCleanup(source);
+		}
+		LogEventInputState(runManager, runState, source + " after");
+		string notReadyReason = GetLoopedEventInputNotReadyReason(runManager, runState);
+		if (!string.IsNullOrEmpty(notReadyReason))
+		{
+			ModEntry.Logger.Warn("STS2Plus endless loop: looped multiplayer Neow not ready for input: " + notReadyReason, 1);
+			return false;
+		}
+		ModEntry.Logger.Info("STS2Plus endless loop: looped multiplayer Neow ready for input.", 1);
+		return true;
+	}
+
+	internal static void LogEventInputState(RunManager? runManager, RunState? runState, string phase)
+	{
+		if (runManager == null || runState == null)
+		{
+			ModEntry.Logger.Warn("STS2Plus endless loop: event input state skipped because run state is unavailable at " + phase + ".", 1);
+			return;
+		}
+		string roomType = GameReflection.GetCurrentRoom()?.GetType().Name ?? "<null>";
+		string mapPoint = GameReflection.DescribeMapPoint(GameReflection.GetCurrentMapPoint());
+		string bufferCurrent = (runManager.RunLocationTargetedBuffer == null) ? "<null>" : runManager.RunLocationTargetedBuffer.CurrentLocation.ToString();
+		string acceptingVotes = MapSelectionAcceptingVotesField?.GetValue(runManager.MapSelectionSynchronizer)?.ToString() ?? "<null>";
+		int mapGenerationCount = runManager.MapSelectionSynchronizer?.MapGenerationCount ?? -1;
+		int queuedActions = CountCollection(ActionQueueRequestedActionsField?.GetValue(runManager.ActionQueueSynchronizer));
+		bool executorPaused = SafeGet(() => (ActionExecutorIsPausedProperty?.GetValue(runManager.ActionExecutor) as bool?).GetValueOrDefault(), false);
+		string eventState = DescribeEventSynchronizerState(runManager.EventSynchronizer);
+		int pendingChoices = CountCollection(PlayerChoiceSynchronizerChoicesField?.GetValue(runManager.PlayerChoiceSynchronizer));
+		int pendingChoiceIds = CountCollection(PlayerChoiceSynchronizerChoiceIdsField?.GetValue(runManager.PlayerChoiceSynchronizer));
+		int pendingRewards = CountCollection(RewardsSetSynchronizerRewardsField?.GetValue(runManager.RewardsSetSynchronizer));
+		int pendingRewardIds = CountCollection(RewardsSetSynchronizerIdsField?.GetValue(runManager.RewardsSetSynchronizer));
+		ModEntry.Logger.Info($"STS2Plus endless loop: event input state {phase} postCleanup={EndlessLoopCoordinator.IsPostEndlessLoadCleanupActive} room={roomType} mapPoint={mapPoint} mapLocation={runState.MapLocation} runLocation={runState.RunLocation} bufferCurrent={bufferCurrent} mapGen={mapGenerationCount} acceptingVotesFromSource={acceptingVotes} queuedActions={queuedActions} actionExecutorPaused={executorPaused} pendingChoices={pendingChoices}/{pendingChoiceIds} pendingRewards={pendingRewards}/{pendingRewardIds} eventSync={eventState}.", 1);
+	}
+
+	private static string GetLoopedEventInputNotReadyReason(RunManager runManager, RunState runState)
+	{
+		List<string> reasons = new List<string>();
+		if (EndlessLoopCoordinator.IsPostEndlessLoadCleanupActive)
+		{
+			reasons.Add("postCleanup=true");
+		}
+		if (runState.RunLocation == null)
+		{
+			reasons.Add("runLocation=null");
+		}
+		if (runManager.RunLocationTargetedBuffer?.CurrentLocation == null)
+		{
+			reasons.Add("bufferCurrent=null");
+		}
+		else if (!Equals(runManager.RunLocationTargetedBuffer.CurrentLocation, runState.RunLocation))
+		{
+			reasons.Add("bufferCurrent!=runLocation");
+		}
+		if (CountCollection(ActionQueueRequestedActionsField?.GetValue(runManager.ActionQueueSynchronizer)) > 0)
+		{
+			reasons.Add("queuedActions>0");
+		}
+		if (CountCollection(PlayerChoiceSynchronizerChoicesField?.GetValue(runManager.PlayerChoiceSynchronizer)) > 0)
+		{
+			reasons.Add("pendingChoices>0");
+		}
+		if (CountCollection(RewardsSetSynchronizerRewardsField?.GetValue(runManager.RewardsSetSynchronizer)) > 0)
+		{
+			reasons.Add("pendingRewards>0");
+		}
+		if (!HasLiveEventOptionsForAllPlayers(runManager.EventSynchronizer, runState))
+		{
+			reasons.Add("eventOptionsMissing");
+		}
+		return string.Join(", ", reasons);
+	}
+
+	private static bool HasLiveEventOptionsForAllPlayers(EventSynchronizer? synchronizer, RunState runState)
+	{
+		if (synchronizer == null)
+		{
+			return false;
+		}
+		object? eventsObject = EventSynchronizerEventsProperty?.GetValue(synchronizer) ?? EventSynchronizerEventsField?.GetValue(synchronizer);
+		if (eventsObject is not IEnumerable events)
+		{
+			return false;
+		}
+		int count = 0;
+		foreach (object? eventModel in events)
+		{
+			if (eventModel == null)
+			{
+				return false;
+			}
+			object? options = AccessTools.Property(eventModel.GetType(), "CurrentOptions")?.GetValue(eventModel);
+			if (CountCollection(options) <= 0)
+			{
+				return false;
+			}
+			count++;
+		}
+		return count >= (runState.Players?.Count ?? 0);
+	}
+
+	private static void TryResetActionQueueSet(object? actionQueueSet)
+	{
+		try
+		{
+			ActionQueueSetResetMethod?.Invoke(actionQueueSet, Array.Empty<object>());
+		}
+		catch (Exception ex)
+		{
+			ModEntry.Logger.Warn("STS2Plus endless loop: failed to reset ActionQueueSet - " + ex.Message, 1);
+		}
+	}
+
+	private static void TryPauseAndUnpauseActionExecutor(object? actionExecutor)
+	{
+		try
+		{
+			ActionExecutorPauseMethod?.Invoke(actionExecutor, Array.Empty<object>());
+			ActionExecutorUnpauseMethod?.Invoke(actionExecutor, Array.Empty<object>());
+		}
+		catch (Exception ex)
+		{
+			ModEntry.Logger.Warn("STS2Plus endless loop: failed to refresh ActionExecutor pause state - " + ex.Message, 1);
+		}
+	}
+
+	private static void ClearStaleChoiceAndRewardState(RunManager runManager)
+	{
+		ReplaceCollection(PlayerChoiceSynchronizerChoicesField?.GetValue(runManager.PlayerChoiceSynchronizer));
+		ReplaceCollection(PlayerChoiceSynchronizerChoiceIdsField?.GetValue(runManager.PlayerChoiceSynchronizer));
+		ReplaceCollection(RewardsSetSynchronizerRewardsField?.GetValue(runManager.RewardsSetSynchronizer));
+		ReplaceCollection(RewardsSetSynchronizerIdsField?.GetValue(runManager.RewardsSetSynchronizer));
+		ReplaceCollection(EventSynchronizerVotesField?.GetValue(runManager.EventSynchronizer));
+		try
+		{
+			EventSynchronizerPageIndexField?.SetValue(runManager.EventSynchronizer, 0u);
+		}
+		catch (Exception ex)
+		{
+			ModEntry.Logger.Warn("STS2Plus endless loop: failed to reset EventSynchronizer page index - " + ex.Message, 1);
+		}
+	}
+
+	private static string DescribeEventSynchronizerState(EventSynchronizer? synchronizer)
+	{
+		if (synchronizer == null)
+		{
+			return "<null>";
+		}
+		try
+		{
+			bool isShared = (EventSynchronizerIsSharedProperty?.GetValue(synchronizer) as bool?).GetValueOrDefault();
+			int voteCount = CountCollection(EventSynchronizerVotesField?.GetValue(synchronizer));
+			uint pageIndex = (EventSynchronizerPageIndexField?.GetValue(synchronizer) as uint?).GetValueOrDefault();
+			object? localEvent = EventSynchronizerGetLocalEventMethod?.Invoke(synchronizer, Array.Empty<object>());
+			string localEventId = localEvent == null ? "<null>" : (AccessTools.Property(localEvent.GetType(), "Id")?.GetValue(localEvent)?.ToString() ?? localEvent.GetType().Name);
+			object? localOptions = localEvent == null ? null : AccessTools.Property(localEvent.GetType(), "CurrentOptions")?.GetValue(localEvent);
+			List<string> optionTextKeys = new List<string>();
+			if (localOptions is IEnumerable enumerable)
+			{
+				foreach (object? option in enumerable)
+				{
+					optionTextKeys.Add(AccessTools.Property(option?.GetType(), "TextKey")?.GetValue(option)?.ToString() ?? "<null>");
+				}
+			}
+			return $"shared={isShared} page={pageIndex} votes={voteCount} localEvent={localEventId} localOptions=[{string.Join(", ", optionTextKeys)}]";
+		}
+		catch (Exception ex)
+		{
+			return "error=" + ex.GetType().Name + ":" + ex.Message;
+		}
 	}
 
 	private static void SafeLogPlayerState(RunState? runState, string phase, int loopIndex, string mapSeed)

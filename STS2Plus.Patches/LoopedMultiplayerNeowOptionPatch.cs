@@ -1,10 +1,9 @@
 using System;
 using System.Collections;
 using System.Reflection;
-using System.Threading.Tasks;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Events;
-using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Runs;
 using STS2Plus.Reflection;
 
 namespace STS2Plus.Patches;
@@ -97,6 +96,26 @@ internal static class LoopedMultiplayerNeowOptionPatch
 	}
 
 	[HarmonyPatch]
+	private static class EventRoomReadyPatch
+	{
+		[HarmonyTargetMethod]
+		private static MethodBase? TargetMethod()
+		{
+			return (EventRoomNodeType == null) ? null : AccessTools.Method(EventRoomNodeType, "_Ready", (Type[])null, (Type[])null);
+		}
+
+		private static void Postfix()
+		{
+			if (!GameReflection.IsMultiplayerRun() || GameReflection.GetLoopCount() <= 0)
+			{
+				return;
+			}
+			EndlessLoopTransition.LogEventInputState(RunManager.Instance, RunManager.Instance?.DebugOnlyGetState(), "looped-neow room-ready");
+			EndlessLoopTransition.PrepareLoopedMultiplayerEventInputIfNeeded("NEventRoom._Ready");
+		}
+	}
+
+	[HarmonyPatch]
 	private static class OptionButtonClickedPatch
 	{
 		[HarmonyTargetMethod]
@@ -105,16 +124,23 @@ internal static class LoopedMultiplayerNeowOptionPatch
 			return (EventRoomNodeType == null) ? null : AccessTools.Method(EventRoomNodeType, "OptionButtonClicked", (Type[])null, (Type[])null);
 		}
 
-		private static void Prefix(EventOption option, int index)
+		private static bool Prefix(EventOption option, int index)
 		{
 			if (!GameReflection.IsMultiplayerRun() || GameReflection.GetLoopCount() <= 0)
 			{
-				return;
+				return true;
 			}
+			EndlessLoopTransition.LogEventInputState(RunManager.Instance, RunManager.Instance?.DebugOnlyGetState(), "looped-neow option-click");
 			string title = DescribeOptionTitle(option);
 			string textKey = DescribeTextKey(option);
 			bool isReplacement = EndlessModeNeowOptionsPatch.TryGetReplacementOptionMetadata(option, out int replacementLoop, out string replacementSource);
 			ModEntry.Logger.Info($"STS2Plus looped multiplayer Neow option button clicked optionIndex={index} title={title} textKey={textKey} loopIndex={GameReflection.GetLoopCount()} replacement={isReplacement} replacementLoop={replacementLoop} replacementSource={replacementSource}.", 1);
+			if (!EndlessLoopTransition.PrepareLoopedMultiplayerEventInputIfNeeded("NEventRoom.OptionButtonClicked"))
+			{
+				ModEntry.Logger.Warn("STS2Plus looped multiplayer Neow option click blocked because event input is not ready.", 1);
+				return false;
+			}
+			return true;
 		}
 	}
 
