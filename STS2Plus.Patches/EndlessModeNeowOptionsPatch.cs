@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Events;
 using STS2Plus.Reflection;
@@ -13,6 +14,26 @@ namespace STS2Plus.Patches;
 [HarmonyPatch]
 internal static class EndlessModeNeowOptionsPatch
 {
+	private sealed class SuppressedModifierState
+	{
+		public required IList ModifiersList { get; init; }
+
+		public required List<object?> Snapshot { get; init; }
+
+		public int LoopCount { get; init; }
+	}
+
+	private sealed class ReplacementOptionState
+	{
+		public int LoopCount { get; init; }
+
+		public string Source { get; init; } = string.Empty;
+	}
+
+	private static readonly ConditionalWeakTable<object, SuppressedModifierState> SuppressedModifierStates = new ConditionalWeakTable<object, SuppressedModifierState>();
+
+	private static readonly ConditionalWeakTable<EventOption, ReplacementOptionState> ReplacementOptions = new ConditionalWeakTable<EventOption, ReplacementOptionState>();
+
 	[HarmonyTargetMethod]
 	private static MethodBase? TargetMethod()
 	{
@@ -20,13 +41,48 @@ internal static class EndlessModeNeowOptionsPatch
 		return (type == null) ? null : AccessTools.Method(type, "GenerateInitialOptions", (Type[])null, (Type[])null);
 	}
 
+	private static void Prefix(object __instance)
+	{
+		if (ShouldTemporarilySuppressModifierOptions(__instance, out int loopCount, out IList? modifiersList))
+		{
+			List<object?> snapshot = new List<object?>();
+			foreach (object? item in modifiersList)
+			{
+				snapshot.Add(item);
+			}
+			modifiersList.Clear();
+			SuppressedModifierStates.Remove(__instance);
+			SuppressedModifierStates.Add(__instance, new SuppressedModifierState
+			{
+				ModifiersList = modifiersList,
+				Snapshot = snapshot,
+				LoopCount = loopCount
+			});
+			ModEntry.Logger.Info($"EndlessModeNeowOptions: temporarily suppressed modifier-generated Neow options for multiplayer loopIndex={loopCount} modifierCount={snapshot.Count}.", 1);
+		}
+	}
+
 	private static void Postfix(object __instance, ref IReadOnlyList<EventOption> __result)
 	{
+		if (TryRestoreSuppressedModifiers(__instance, out SuppressedModifierState? suppressedState))
+		{
+			ModEntry.Logger.Info($"EndlessModeNeowOptions: restored modifier list after multiplayer loopIndex={suppressedState.LoopCount} generatedCount={__result?.Count ?? 0}.", 1);
+			if ((__result?.Count ?? 0) > 0)
+			{
+				return;
+			}
+			if (TryRestoreLoopContinuationNeowOptions(__instance, out IReadOnlyList<EventOption> fallbackAfterSuppression, "multiplayer-fallback"))
+			{
+				__result = fallbackAfterSuppression;
+				ModEntry.Logger.Warn($"EndlessModeNeowOptions: multiplayer normal generation returned no options, using fallback loopIndex={suppressedState.LoopCount} replacementCount={fallbackAfterSuppression.Count}.", 1);
+			}
+			return;
+		}
 		if (PlusState.IsEndlessModeActive())
 		{
 			if (ShouldSkipLoopedNeowHandling(out int loopCount, out bool trueNewRun))
 			{
-				if (TryRestoreLoopContinuationNeowOptions(__instance, out IReadOnlyList<EventOption> replacement))
+				if (TryRestoreLoopContinuationNeowOptions(__instance, out IReadOnlyList<EventOption> replacement, "singleplayer-fallback"))
 				{
 					__result = replacement;
 					ModEntry.Logger.Info($"EndlessModeNeowOptions skipped modifier options because loopIndex > 0 loopIndex={loopCount} trueNewRun={trueNewRun} replacementCount={replacement.Count}.", 1);
@@ -59,7 +115,7 @@ internal static class EndlessModeNeowOptionsPatch
 			{
 				return false;
 			}
-			if (!TryRestoreLoopContinuationNeowOptions(obj2, out IReadOnlyList<EventOption> loopFallback))
+			if (!TryRestoreLoopContinuationNeowOptions(obj2, out IReadOnlyList<EventOption> loopFallback, "room-repair"))
 			{
 				ModEntry.Logger.Warn($"EndlessModeNeowOptions failed to repair loop continuation Neow room loopIndex={loopCount} trueNewRun={trueNewRun}.", 1);
 				return false;
@@ -100,7 +156,7 @@ internal static class EndlessModeNeowOptionsPatch
 
 	private static bool TryRestoreNeowOptions(object neow, out IReadOnlyList<EventOption> fallback)
 	{
-		fallback = BuildFallbackOptions(neow);
+		fallback = BuildFallbackOptions(neow, null);
 		if (fallback.Count == 0)
 		{
 			ModEntry.Logger.Warn("STS2Plus endless Neow fallback could not find any replacement options.", 1);
@@ -110,10 +166,11 @@ internal static class EndlessModeNeowOptionsPatch
 		return true;
 	}
 
-	private static IReadOnlyList<EventOption> BuildFallbackOptions(object neow)
+	private static IReadOnlyList<EventOption> BuildFallbackOptions(object neow, string? replacementSource)
 	{
 		object rng = AccessTools.Property(neow.GetType(), "Rng")?.GetValue(neow);
 		object owner = AccessTools.Property(neow.GetType(), "Owner")?.GetValue(neow);
+		int loopCount = GameReflection.GetLoopCount();
 		int playerCount = GetPlayerCount(owner);
 		List<EventOption> list = ReadEventOptions(AccessTools.Property(neow.GetType(), "CurseOptions")?.GetValue(neow));
 		if (ShouldAllowBundleOption(owner))
@@ -151,6 +208,7 @@ internal static class EndlessModeNeowOptionsPatch
 			IReadOnlyList<EventOption> readOnlyList = list3;
 			result = readOnlyList;
 		}
+		TrackReplacementOptions(result, loopCount, replacementSource);
 		return result;
 	}
 
@@ -208,7 +266,9 @@ internal static class EndlessModeNeowOptionsPatch
 			AddOptions(list, AccessTools.Property(neow.GetType(), "AllPossibleOptions")?.GetValue(neow));
 		}
 		Shuffle(list, rng);
-		return list.Take(3).ToList();
+		IReadOnlyList<EventOption> readOnlyList = list.Take(3).ToList();
+		TrackReplacementOptions(readOnlyList, GameReflection.GetLoopCount(), "shuffled-fallback");
+		return readOnlyList;
 	}
 
 	private static bool ShouldAllowBundleOption(object? owner)
@@ -426,10 +486,70 @@ internal static class EndlessModeNeowOptionsPatch
 		return false;
 	}
 
-	private static bool TryRestoreLoopContinuationNeowOptions(object neow, out IReadOnlyList<EventOption> replacement)
+	private static bool TryRestoreLoopContinuationNeowOptions(object neow, out IReadOnlyList<EventOption> replacement, string replacementSource)
 	{
-		replacement = BuildFallbackOptions(neow);
+		replacement = BuildFallbackOptions(neow, replacementSource);
 		return replacement.Count > 0;
+	}
+
+	internal static bool TryGetReplacementOptionMetadata(EventOption option, out int loopCount, out string source)
+	{
+		if (ReplacementOptions.TryGetValue(option, out ReplacementOptionState? value))
+		{
+			loopCount = value.LoopCount;
+			source = value.Source;
+			return true;
+		}
+		loopCount = -1;
+		source = string.Empty;
+		return false;
+	}
+
+	private static bool ShouldTemporarilySuppressModifierOptions(object neow, out int loopCount, out IList? modifiersList)
+	{
+		loopCount = GameReflection.GetLoopCount();
+		modifiersList = null;
+		if (!PlusState.IsEndlessModeActive() || loopCount <= 0 || !GameReflection.IsMultiplayerRun())
+		{
+			return false;
+		}
+		object? owner = AccessTools.Property(neow.GetType(), "Owner")?.GetValue(neow);
+		object? runState = (owner == null) ? null : AccessTools.Property(owner.GetType(), "RunState")?.GetValue(owner);
+		object? modifiers = (runState == null) ? null : AccessTools.Property(runState.GetType(), "Modifiers")?.GetValue(runState);
+		modifiersList = modifiers as IList;
+		return modifiersList != null && modifiersList.Count > 0;
+	}
+
+	private static bool TryRestoreSuppressedModifiers(object neow, out SuppressedModifierState? state)
+	{
+		if (!SuppressedModifierStates.TryGetValue(neow, out state) || state == null)
+		{
+			return false;
+		}
+		SuppressedModifierStates.Remove(neow);
+		state.ModifiersList.Clear();
+		foreach (object? item in state.Snapshot)
+		{
+			state.ModifiersList.Add(item);
+		}
+		return true;
+	}
+
+	private static void TrackReplacementOptions(IEnumerable<EventOption> options, int loopCount, string? replacementSource)
+	{
+		if (string.IsNullOrWhiteSpace(replacementSource))
+		{
+			return;
+		}
+		foreach (EventOption option in options)
+		{
+			ReplacementOptions.Remove(option);
+			ReplacementOptions.Add(option, new ReplacementOptionState
+			{
+				LoopCount = loopCount,
+				Source = replacementSource
+			});
+		}
 	}
 
 	private static void EnsureStartedWithNeowFlag()
