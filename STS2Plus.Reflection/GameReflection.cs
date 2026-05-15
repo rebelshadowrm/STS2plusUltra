@@ -1303,7 +1303,25 @@ internal static class GameReflection
 	public static object? GetCurrentMapPoint()
 	{
 		object runState = GetRunState();
-		return (runState == null) ? null : RunStateCurrentMapPointProperty?.GetValue(runState);
+		if (runState == null)
+		{
+			return null;
+		}
+		object obj = RunStateCurrentMapPointProperty?.GetValue(runState);
+		if (obj != null)
+		{
+			return obj;
+		}
+		object obj2 = RunStateCurrentRoomProperty?.GetValue(runState);
+		if (obj2 != null)
+		{
+			string text = AccessTools.Property(obj2.GetType(), "RoomType")?.GetValue(obj2)?.ToString() ?? obj2.GetType().Name;
+			if (string.Equals(text, "EventRoom", StringComparison.OrdinalIgnoreCase) || string.Equals(text, "Event", StringComparison.OrdinalIgnoreCase) || obj2.GetType().Name.IndexOf("EventRoom", StringComparison.OrdinalIgnoreCase) >= 0)
+			{
+				return GetStartingMapPoint();
+			}
+		}
+		return null;
 	}
 
 	public static object? GetRouteStartPoint()
@@ -2275,8 +2293,18 @@ internal static class GameReflection
 				ModEntry.Logger.Info($"STS2Plus legacy singleplayer endless loop: no active event to clear before continuation loopIndex={loopIndex}.", 1);
 				return;
 			}
-			bool flag = TryInvokeNoArg(obj2, "SetEventFinished") || TryInvokeNoArg(obj2, "Done");
-			ModEntry.Logger.Info($"STS2Plus legacy singleplayer endless loop: active event clear loopIndex={loopIndex} event={text} cleared={flag}.", 1);
+			bool value;
+			if (TryReadBool(obj2, "IsFinished", out value) && value)
+			{
+				bool flag = TryInvokeNoArg(obj2, "EnsureCleanup");
+				ModEntry.Logger.Info($"STS2Plus legacy singleplayer endless loop: active event already finished loopIndex={loopIndex} event={text} cleanupEnsured={flag}.", 1);
+				return;
+			}
+			bool flag2 = TryInvokeNoArg(obj2, "SetEventFinished") || TryInvokeNoArg(obj2, "Done");
+			flag2 |= TryInvokeNoArg(obj2, "EnsureCleanup");
+			bool value2;
+			bool flag3 = flag2 || (TryReadBool(obj2, "IsFinished", out value2) && value2);
+			ModEntry.Logger.Info($"STS2Plus legacy singleplayer endless loop: active event clear loopIndex={loopIndex} event={text} cleared={flag3}.", 1);
 		}
 		catch (Exception ex)
 		{

@@ -28,6 +28,8 @@ internal static class EndlessDebugTools
 
 	private static readonly PropertyInfo? NGameCurrentScreenProperty = AccessTools.Property(typeof(NGame), "CurrentScreen");
 
+	private static readonly PropertyInfo? EventModelIsFinishedProperty = AccessTools.Property(RuntimeTypeResolver.FindType("MegaCrit.Sts2.Core.Models.EventModel") ?? RuntimeTypeResolver.FindTypeByName("EventModel"), "IsFinished");
+
 	private static readonly MethodInfo? KillWithoutCheckingWinConditionMethod = AccessTools.Method(typeof(CreatureCmd), "KillWithoutCheckingWinCondition", new Type[3]
 	{
 		typeof(Creature),
@@ -120,7 +122,42 @@ internal static class EndlessDebugTools
 		{
 			return "combat is still in progress";
 		}
+		if (TryDescribeUnfinishedCurrentEvent(runState, out string unfinishedEvent))
+		{
+			return "unfinished event still active: " + unfinishedEvent;
+		}
 		return string.Empty;
+	}
+
+	private static bool TryDescribeUnfinishedCurrentEvent(RunState runState, out string description)
+	{
+		description = string.Empty;
+		try
+		{
+			object? currentRoom = GameReflection.GetCurrentRoom();
+			if (currentRoom == null)
+			{
+				return false;
+			}
+			object? eventModel = AccessTools.Property(currentRoom.GetType(), "CanonicalEvent")?.GetValue(currentRoom) ?? AccessTools.Property(currentRoom.GetType(), "Event")?.GetValue(currentRoom) ?? AccessTools.Property(currentRoom.GetType(), "Model")?.GetValue(currentRoom) ?? AccessTools.Field(currentRoom.GetType(), "CanonicalEvent")?.GetValue(currentRoom) ?? AccessTools.Field(currentRoom.GetType(), "Event")?.GetValue(currentRoom) ?? AccessTools.Field(currentRoom.GetType(), "Model")?.GetValue(currentRoom);
+			if (eventModel == null)
+			{
+				return false;
+			}
+			bool isFinished = (EventModelIsFinishedProperty?.GetValue(eventModel) as bool?).GetValueOrDefault();
+			if (isFinished)
+			{
+				return false;
+			}
+			string eventId = AccessTools.Property(eventModel.GetType(), "Id")?.GetValue(eventModel)?.ToString() ?? AccessTools.Property(eventModel.GetType(), "EventId")?.GetValue(eventModel)?.ToString() ?? eventModel.GetType().Name;
+			description = eventId;
+			return true;
+		}
+		catch (Exception ex)
+		{
+			ModEntry.Logger.Warn("STS2Plus endless debug: failed to inspect current event before F9 - " + ex.GetType().Name + ": " + ex.Message, 1);
+			return false;
+		}
 	}
 
 	internal static async Task<string> ForceCurrentRoomOrCombatWinAsync()
