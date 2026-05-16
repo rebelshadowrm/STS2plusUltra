@@ -20,7 +20,7 @@ internal static class RandomEndlessZonePatch
 	{
 		public required string BaseSeed { get; init; }
 
-		public required string DisplayActId { get; init; }
+		public required int DisplayActNumber { get; init; }
 
 		public required string SelectedActId { get; init; }
 
@@ -49,14 +49,14 @@ internal static class RandomEndlessZonePatch
 			int loopIndex = GameReflection.GetLoopCount();
 			uint resolvedSeed = StableHashToUInt32(baseSeed + "|loop=" + loopIndex + "|salt=STS2Plus.RandomEndlessZone");
 			string selectedActId = ChooseZone(resolvedSeed);
-			string displayActId = state.Act.Id.Entry;
-			ModEntry.Logger.Info($"EndlessActContext baseSeed={baseSeed} loopIndex={loopIndex} displayAct={displayActId} selectedAct={selectedActId} resolvedSeed={resolvedSeed}", 1);
+			int displayActNumber = GameReflection.GetTotalActNumber();
+			ModEntry.Logger.Info($"EndlessActContext baseSeed={baseSeed} loopIndex={loopIndex} displayAct={displayActNumber} selectedAct={selectedActId} resolvedSeed={resolvedSeed}", 1);
 			ModEntry.Logger.Info($"RandomEndlessZone pool=[{string.Join(", ", ZonePool)}]", 1);
 			bool applied = TryReplaceCurrentAct(state, selectedActId, out string fallbackReason);
 			SelectionStates.Add(__instance, new ZoneSelectionState
 			{
 				BaseSeed = baseSeed,
-				DisplayActId = displayActId,
+				DisplayActNumber = displayActNumber,
 				SelectedActId = selectedActId,
 				ResolvedSeed = resolvedSeed,
 				Applied = applied,

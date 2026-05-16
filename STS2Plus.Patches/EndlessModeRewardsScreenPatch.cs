@@ -1,11 +1,15 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
-using System.Threading.Tasks;
-using Godot;
 using HarmonyLib;
-using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Rewards;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using STS2Plus.Modifiers;
 using STS2Plus.Reflection;
 
 namespace STS2Plus.Patches;
@@ -14,250 +18,147 @@ namespace STS2Plus.Patches;
 [HarmonyPatch]
 internal static class EndlessModeRewardsScreenPatch
 {
-	private static readonly HashSet<nint> _loggedRewardsScreens = new HashSet<nint>();
-
 	[HarmonyTargetMethod]
 	private static MethodBase? TargetMethod()
 	{
-		Type? type = RuntimeTypeResolver.FindType("MegaCrit.Sts2.Core.Runs.RunManager") ?? RuntimeTypeResolver.FindTypeByName("RunManager");
-		return type != null ? AccessTools.Method(type, "ProceedFromTerminalRewardsScreen", (Type[])null, (Type[])null) : null;
-	}
-
-	private static bool Prefix(object __instance, ref Task? __result)
-	{
-		if (__instance is not RunManager runManager)
-		{
-			return true;
-		}
-		if (!TryDescribeFinalBossRewardsTransition(runManager, out var currentRoomType, out var isVictoryRoom, out var currentActIndex, out var actsCount, out var currentEncounterId))
-		{
-			return true;
-		}
-		ModEntry.Logger.Info($"EndlessFinalBossProceedSuppress: finished-combat boss room detected encounter={currentEncounterId} currentActIndex={currentActIndex} actsCount={actsCount} currentRoom={currentRoomType} isVictoryRoom={isVictoryRoom}.", 1);
-		if (EndlessLoopCoordinator.IsLaunching)
-		{
-			ModEntry.Logger.Info("EndlessFinalBossProceedSuppress: ProceedFromTerminalRewardsScreen ignored because endless transition is already launching.", 1);
-			__result = Task.CompletedTask;
-			return false;
-		}
-		ModEntry.Logger.Info("EndlessFinalBossProceedSuppress: auto-starting endless transition.", 1);
-		__result = EndlessModePreArchitectPatch.StartBypassTransition(runManager, isArchitectEvent: false, fromUi: true) ?? Task.CompletedTask;
-		return false;
-	}
-
-	internal static bool TryDescribeFinalBossRewardsTransition(RunManager runManager, out string currentRoomType, out bool isVictoryRoom, out int currentActIndex, out int actsCount, out string currentEncounterId)
-	{
-		currentRoomType = "<null>";
-		isVictoryRoom = false;
-		currentActIndex = -1;
-		actsCount = -1;
-		currentEncounterId = "<none>";
-		if (!EndlessModePreArchitectPatch.TryDescribeCurrentTransitionContext(runManager, out var state, out var currentRoom, out _, out _, out currentRoomType, out isVictoryRoom, out currentActIndex, out actsCount, out currentEncounterId))
-		{
-			return false;
-		}
-		if (state == null || currentRoom == null)
-		{
-			return false;
-		}
-		if (!string.Equals(currentRoomType, "CombatRoom", StringComparison.Ordinal) && !currentRoomType.EndsWith("CombatRoom", StringComparison.Ordinal))
-		{
-			return false;
-		}
-		if (!currentEncounterId.EndsWith("_BOSS", StringComparison.OrdinalIgnoreCase))
-		{
-			return false;
-		}
-		return true;
-	}
-
-	internal static (bool Found, bool Visible, bool Enabled, string Label) DescribeProceedButton(object rewardsScreen)
-	{
 		try
 		{
-			GodotObject? proceedButton = FindProceedButton(rewardsScreen);
-			if (proceedButton == null)
+			Type? rewardsSetType = RuntimeTypeResolver.FindType("MegaCrit.Sts2.Core.Rewards.RewardsSet");
+			MethodBase? method = (rewardsSetType == null) ? null : AccessTools.Method(rewardsSetType, "WithRewardsFromRoom", new[] { RuntimeTypeResolver.FindType("MegaCrit.Sts2.Core.Rooms.AbstractRoom") });
+			ModEntry.Logger.Info("EndlessModeRewardsScreenPatch: TargetMethod resolved RewardsSet.WithRewardsFromRoom = " + (method != null), 1);
+			if (method != null)
 			{
-				return (false, false, false, "<none>");
+				ModEntry.Logger.Info("EndlessModeRewardsScreenPatch: patch active", 1);
 			}
-			return (true, ReadVisible(proceedButton), ReadEnabled(proceedButton), ReadLabel(proceedButton));
+			return method;
 		}
 		catch (Exception ex)
 		{
-			ModEntry.Logger.Warn("EndlessFinalBossProceedSuppress: failed to describe rewards proceed button - " + ex.GetType().Name + ": " + ex.Message, 1);
-			return (false, false, false, "<error>");
-		}
-	}
-
-	internal static void TryHideProceedButton(object rewardsScreen)
-	{
-		try
-		{
-			GodotObject? proceedButton = FindProceedButton(rewardsScreen);
-			if (proceedButton == null)
-			{
-				return;
-			}
-			if (proceedButton is CanvasItem canvasItem)
-			{
-				canvasItem.Visible = false;
-			}
-			AccessTools.Method(proceedButton.GetType(), "Disable")?.Invoke(proceedButton, null);
-		}
-		catch (Exception ex)
-		{
-			ModEntry.Logger.Warn("EndlessFinalBossProceedSuppress: failed to hide rewards proceed button - " + ex.GetType().Name + ": " + ex.Message, 1);
-		}
-	}
-
-	internal static void TryRelabelProceedButton(object rewardsScreen, string label)
-	{
-		try
-		{
-			GodotObject? proceedButton = FindProceedButton(rewardsScreen);
-			if (proceedButton == null)
-			{
-				return;
-			}
-			PropertyInfo? textProperty = AccessTools.Property(proceedButton.GetType(), "Text");
-			if (textProperty != null && textProperty.CanWrite)
-			{
-				textProperty.SetValue(proceedButton, label);
-				return;
-			}
-			MethodInfo? setTextAutoSize = AccessTools.Method(proceedButton.GetType(), "SetTextAutoSize", new[] { typeof(string) });
-			if (setTextAutoSize != null)
-			{
-				setTextAutoSize.Invoke(proceedButton, new object[] { label });
-				return;
-			}
-		}
-		catch (Exception ex)
-		{
-			ModEntry.Logger.Warn("EndlessFinalBossProceedSuppress: failed to relabel rewards proceed button - " + ex.GetType().Name + ": " + ex.Message, 1);
-		}
-	}
-
-	internal static GodotObject? FindProceedButton(object rewardsScreen)
-	{
-		if (rewardsScreen is not Node root)
-		{
+			ModEntry.Logger.Warn("EndlessModeRewardsScreenPatch: TargetMethod failed - " + ex.GetType().Name + ": " + ex.Message, 1);
 			return null;
 		}
-		return FindProceedButtonRecursive(root);
 	}
 
-	private static GodotObject? FindProceedButtonRecursive(Node node)
+	private static void Postfix(object __instance, object? room)
 	{
-		string nodeName = node.Name.ToString();
-		string typeName = node.GetType().Name;
-		if (nodeName.Contains("ProceedButton", StringComparison.OrdinalIgnoreCase) || typeName.Contains("ProceedButton", StringComparison.OrdinalIgnoreCase))
+		try
 		{
-			return node;
-		}
-		foreach (Node child in node.GetChildren())
-		{
-			GodotObject? found = FindProceedButtonRecursive(child);
-			if (found != null)
+			if (__instance is not RewardsSet rewardsSet)
 			{
-				return found;
+				return;
 			}
+			Player? player = rewardsSet.Player;
+			if (player == null)
+			{
+				return;
+			}
+			object? runState = player.RunState;
+			bool endlessActive = HasEndlessModeModifier(runState);
+			ModEntry.Logger.Info($"EndlessGate: ENDLESS_MODE active={endlessActive} source=RewardsSet.WithRewardsFromRoom", 1);
+			if (!TryDescribeFinalBossContext(runState, room, out int currentActIndex, out int actsCount, out string roomType))
+			{
+				ModEntry.Logger.Info($"EndlessFinalBossRewards: skipped reason=not-final-boss room={roomType} act={currentActIndex} actsCount={actsCount}", 1);
+				return;
+			}
+			ModEntry.Logger.Info($"EndlessFinalBossRewards: WithRewardsFromRoom finalBoss=true endlessActive={endlessActive} room={roomType} act={currentActIndex} actsCount={actsCount}", 1);
+			if (!endlessActive)
+			{
+				ModEntry.Logger.Info("EndlessFinalBossRewards: skipped reason=modifier-not-active", 1);
+				return;
+			}
+			if (rewardsSet.Rewards is not IList rewards)
+			{
+				ModEntry.Logger.Warn("EndlessFinalBossRewards: skipped because rewards list could not be resolved.", 1);
+				return;
+			}
+			if (rewards.Count > 0)
+			{
+				ModEntry.Logger.Info($"EndlessFinalBossRewards: skipped reason=rewards-already-present count={rewards.Count}", 1);
+				return;
+			}
+			MethodInfo? generateRewardsFor = AccessTools.Method(typeof(RewardsSet), "GenerateRewardsFor", new[] { typeof(Player), typeof(AbstractRoom) });
+			ModEntry.Logger.Info("EndlessFinalBossRewards: GenerateRewardsFor resolved=" + (generateRewardsFor != null), 1);
+			if (generateRewardsFor == null)
+			{
+				ModEntry.Logger.Warn("EndlessFinalBossRewards: failed because GenerateRewardsFor could not be resolved.", 1);
+				return;
+			}
+			List<Reward>? generated = generateRewardsFor.Invoke(rewardsSet, new object[] { player, room! }) as List<Reward>;
+			if (generated == null)
+			{
+				ModEntry.Logger.Warn("EndlessFinalBossRewards: GenerateRewardsFor returned null.", 1);
+				return;
+			}
+			ModEntry.Logger.Info($"EndlessFinalBossRewards: generated count={generated.Count} types=[{string.Join(", ", generated.Select(DescribeRewardType))}]", 1);
+			rewardsSet.Rewards.AddRange(generated);
+			int extraCount = 0;
+			if (room is CombatRoom combatRoom && combatRoom.ExtraRewards.TryGetValue(player, out List<Reward>? extraRewards))
+			{
+				extraCount = extraRewards?.Count ?? 0;
+				if (extraRewards != null)
+				{
+					rewardsSet.Rewards.AddRange(extraRewards);
+				}
+			}
+			ModEntry.Logger.Info($"EndlessFinalBossRewards: extraRewards count={extraCount}", 1);
+			ModEntry.Logger.Info($"EndlessFinalBossRewards: final rewards count={rewardsSet.Rewards.Count} types=[{string.Join(", ", rewardsSet.Rewards.Select(DescribeRewardType))}]", 1);
 		}
-		return null;
-	}
-
-	private static bool ReadVisible(GodotObject proceedButton)
-	{
-		if (proceedButton is CanvasItem canvasItem)
+		catch (Exception ex)
 		{
-			return canvasItem.Visible;
+			ModEntry.Logger.Warn("EndlessFinalBossRewards: failed - " + ex, 1);
 		}
-		return (AccessTools.Property(proceedButton.GetType(), "Visible")?.GetValue(proceedButton) as bool?).GetValueOrDefault();
 	}
 
-	private static bool ReadEnabled(GodotObject proceedButton)
+	private static bool TryDescribeFinalBossContext(object? runState, object? room, out int currentActIndex, out int actsCount, out string roomType)
 	{
-		object? disabled = AccessTools.Property(proceedButton.GetType(), "Disabled")?.GetValue(proceedButton) ?? AccessTools.Field(proceedButton.GetType(), "Disabled")?.GetValue(proceedButton);
-		if (disabled is bool disabledBool)
-		{
-			return !disabledBool;
-		}
-		MethodInfo? isDisabled = AccessTools.Method(proceedButton.GetType(), "IsDisabled");
-		if (isDisabled != null && isDisabled.Invoke(proceedButton, null) is bool isDisabledBool)
-		{
-			return !isDisabledBool;
-		}
-		return true;
-	}
-
-	private static string ReadLabel(GodotObject proceedButton)
-	{
-		return AccessTools.Property(proceedButton.GetType(), "Text")?.GetValue(proceedButton)?.ToString()
-			?? AccessTools.Field(proceedButton.GetType(), "Text")?.GetValue(proceedButton)?.ToString()
-			?? proceedButton.GetType().Name;
-	}
-
-	private static bool ShouldLogForScreen(object rewardsScreen)
-	{
-		if (rewardsScreen is not GodotObject godotObject)
+		currentActIndex = (AccessTools.Property(runState?.GetType(), "CurrentActIndex")?.GetValue(runState) as int?).GetValueOrDefault(-1);
+		actsCount = CountCollection(AccessTools.Property(runState?.GetType(), "Acts")?.GetValue(runState));
+		roomType = AccessTools.Property(room?.GetType(), "RoomType")?.GetValue(room)?.ToString() ?? room?.GetType().Name ?? "<null>";
+		if (runState == null || room == null)
 		{
 			return false;
 		}
-		nint id = (nint)(long)godotObject.GetInstanceId();
-		return _loggedRewardsScreens.Add(id);
+		if (!string.Equals(roomType, "Boss", StringComparison.OrdinalIgnoreCase))
+		{
+			return false;
+		}
+		return currentActIndex >= actsCount - 1;
 	}
 
-	[HarmonyPatch]
-	internal static class EndlessRewardsScreenUiPatch
+	private static bool HasEndlessModeModifier(object? runState)
 	{
-		[HarmonyTargetMethod]
-		private static MethodBase? TargetMethod()
+		if (runState == null)
 		{
-			Type? type = RuntimeTypeResolver.FindTypeByName("NRewardsScreen");
-			return type != null ? AccessTools.Method(type, "_Process", (Type[])null, (Type[])null) : null;
+			return false;
 		}
+		if (AccessTools.Property(runState.GetType(), "Modifiers")?.GetValue(runState) is not IEnumerable<ModifierModel> modifiers)
+		{
+			return false;
+		}
+		return CustomModifierCatalog.ContainsEntry(modifiers, CustomModifierCatalog.EndlessModeEntry);
+	}
 
-		private static void Postfix(object __instance)
+	private static int CountCollection(object? value)
+	{
+		if (value is ICollection collection)
 		{
-			try
-			{
-				RunManager? runManager = RunManager.Instance;
-				if (runManager == null)
-				{
-					return;
-				}
-				if (!TryDescribeFinalBossRewardsTransition(runManager, out var currentRoomType, out var isVictoryRoom, out var currentActIndex, out var actsCount, out var currentEncounterId))
-				{
-					return;
-				}
-				(bool proceedFound, bool visible, bool enabled, string buttonLabel) = DescribeProceedButton(__instance);
-				if (ShouldLogForScreen(__instance))
-				{
-					ModEntry.Logger.Info($"EndlessFinalBossProceedSuppress: rewardState=terminal proceedButtonFound={proceedFound} visible={visible} enabled={enabled} label={buttonLabel} encounter={currentEncounterId} currentActIndex={currentActIndex} actsCount={actsCount} currentRoom={currentRoomType} isVictoryRoom={isVictoryRoom}.", 1);
-				}
-				if (!proceedFound)
-				{
-					return;
-				}
-				TryRelabelProceedButton(__instance, GameReflection.IsMultiplayerRun() ? "Continue" : "Next Act");
-				if (GameReflection.IsMultiplayerRun())
-				{
-					return;
-				}
-				if (!visible || !enabled || EndlessLoopCoordinator.IsLaunching)
-				{
-					return;
-				}
-				TryHideProceedButton(__instance);
-				ModEntry.Logger.Info("EndlessFinalBossProceedSuppress: hiding/suppressing Architect proceed button.", 1);
-				ModEntry.Logger.Info("EndlessFinalBossProceedSuppress: auto-starting endless transition.", 1);
-				ModEntry.Logger.Info("STS2Plus LOOP PATH: NATURAL_SINGLEPLAYER_PRE_ARCHITECT_UI", 1);
-				TaskHelper.RunSafely(EndlessModePreArchitectPatch.StartBypassTransition(runManager, isArchitectEvent: false, fromUi: true) ?? Task.CompletedTask);
-			}
-			catch (Exception ex)
-			{
-				ModEntry.Logger.Warn("EndlessFinalBossProceedSuppress: failed during NRewardsScreen._Process - " + ex.GetType().Name + ": " + ex.Message, 1);
-			}
+			return collection.Count;
 		}
+		if (value is IEnumerable enumerable)
+		{
+			int count = 0;
+			foreach (object _ in enumerable)
+			{
+				count++;
+			}
+			return count;
+		}
+		return -1;
+	}
+
+	private static string DescribeRewardType(object reward)
+	{
+		string name = reward.GetType().Name;
+		return name.EndsWith("Reward", StringComparison.Ordinal) ? name : (reward.GetType().FullName ?? name);
 	}
 }

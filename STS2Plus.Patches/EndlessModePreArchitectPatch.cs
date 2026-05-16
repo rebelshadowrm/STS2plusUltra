@@ -34,28 +34,7 @@ internal static class EndlessModePreArchitectPatch
 
 	internal static bool TryStartRewardsScreenUiBypass(object rewardsScreen)
 	{
-		RunManager? instance = RunManager.Instance;
-		if (instance == null)
-		{
-			return false;
-		}
-		if (!TryDescribeCurrentTransitionContext(instance, out var _, out var _, out var currentEventId, out var isArchitectEvent, out var currentRoomType, out var isVictoryRoom, out var currentActIndex, out var actsCount, out var currentEncounterId))
-		{
-			return false;
-		}
-		(bool proceedFound, bool visible, bool enabled, string buttonLabel) = EndlessModeRewardsScreenPatch.DescribeProceedButton(rewardsScreen);
-		ModEntry.Logger.Info($"EndlessFinalBossProceedSuppress: finished-combat boss room detected encounter={currentEncounterId} currentActIndex={currentActIndex} actsCount={actsCount} currentRoom={currentRoomType} isVictoryRoom={isVictoryRoom} currentEvent={currentEventId}.", 1);
-		ModEntry.Logger.Info($"EndlessFinalBossProceedSuppress: rewardState=terminal proceedButtonFound={proceedFound} visible={visible} enabled={enabled} label={buttonLabel}.", 1);
-		if (EndlessLoopCoordinator.IsLaunching)
-		{
-			ModEntry.Logger.Info("EndlessFinalBossProceedSuppress: endless transition already launching, UI suppression no-op.", 1);
-			return true;
-		}
-		EndlessModeRewardsScreenPatch.TryHideProceedButton(rewardsScreen);
-		ModEntry.Logger.Info("EndlessFinalBossProceedSuppress: hiding/suppressing Architect proceed button.", 1);
-		ModEntry.Logger.Info("EndlessFinalBossProceedSuppress: auto-starting endless transition.", 1);
-		TaskHelper.RunSafely(StartBypassTransition(instance, isArchitectEvent, fromUi: true) ?? Task.CompletedTask);
-		return true;
+		return false;
 	}
 
 	internal static Task? StartBypassTransition(RunManager runManager, bool isArchitectEvent, bool fromUi)
