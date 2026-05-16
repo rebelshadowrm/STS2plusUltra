@@ -233,10 +233,8 @@ internal static class EndlessModeNeowOptionsPatch
 		}
 		else
 		{
-			IReadOnlyList<EventOption> readOnlyList = list3;
-			result = readOnlyList;
+			result = FinalizeLoopedNeowOptions(neow, owner, rng, playerCount, list3, replacementSource);
 		}
-		TrackReplacementOptions(result, loopCount, replacementSource);
 		return result;
 	}
 
@@ -294,9 +292,79 @@ internal static class EndlessModeNeowOptionsPatch
 			AddOptions(list, AccessTools.Property(neow.GetType(), "AllPossibleOptions")?.GetValue(neow));
 		}
 		Shuffle(list, rng);
+		return FinalizeLoopedNeowOptions(neow, owner, rng, playerCount, list.Take(3).ToList(), "shuffled-fallback");
+	}
+
+	private static IReadOnlyList<EventOption> FinalizeLoopedNeowOptions(object neow, object? owner, object? rng, int playerCount, IEnumerable<EventOption> initialOptions, string? replacementSource)
+	{
+		List<EventOption> list = new List<EventOption>();
+		foreach (EventOption initialOption in initialOptions)
+		{
+			if (TryAcceptLoopedNeowOption(initialOption, owner, playerCount, out string reason) && !list.Contains(initialOption))
+			{
+				list.Add(initialOption);
+			}
+			else if (!string.IsNullOrEmpty(reason))
+			{
+				LogLoopedOptionRemoved(initialOption, reason);
+			}
+		}
+		if (list.Count < 3)
+		{
+			List<EventOption> list2 = BuildSupplementalLoopedNeowOptionPool(neow, owner, playerCount);
+			Shuffle(list2, rng);
+			foreach (EventOption item in list2)
+			{
+				if (list.Count >= 3)
+				{
+					break;
+				}
+				if (list.Contains(item))
+				{
+					continue;
+				}
+				if (!TryAcceptLoopedNeowOption(item, owner, playerCount, out string reason2))
+				{
+					if (!string.IsNullOrEmpty(reason2))
+					{
+						LogLoopedOptionRemoved(item, reason2);
+					}
+					continue;
+				}
+				list.Add(item);
+			}
+		}
 		IReadOnlyList<EventOption> readOnlyList = list.Take(3).ToList();
-		TrackReplacementOptions(readOnlyList, GameReflection.GetLoopCount(), "shuffled-fallback");
+		TrackReplacementOptions(readOnlyList, GameReflection.GetLoopCount(), replacementSource);
+		LogLoopedOptionFinal(readOnlyList);
 		return readOnlyList;
+	}
+
+	private static List<EventOption> BuildSupplementalLoopedNeowOptionPool(object neow, object? owner, int playerCount)
+	{
+		List<EventOption> list = new List<EventOption>();
+		AddOptions(list, AccessTools.Property(neow.GetType(), "PositiveOptions")?.GetValue(neow));
+		AddOptions(list, AccessTools.Property(neow.GetType(), "CurseOptions")?.GetValue(neow));
+		AddOption(list, AccessTools.Property(neow.GetType(), "LavaRockOption")?.GetValue(neow));
+		AddOption(list, AccessTools.Property(neow.GetType(), "NeowsTalismanOption")?.GetValue(neow));
+		AddOption(list, AccessTools.Property(neow.GetType(), "NutritiousOysterOption")?.GetValue(neow));
+		AddOption(list, AccessTools.Property(neow.GetType(), "PomanderOption")?.GetValue(neow));
+		AddOption(list, AccessTools.Property(neow.GetType(), "ScrollBoxesOption")?.GetValue(neow));
+		AddOption(list, AccessTools.Property(neow.GetType(), "SmallCapsuleOption")?.GetValue(neow));
+		AddOption(list, AccessTools.Property(neow.GetType(), "StoneHumidifierOption")?.GetValue(neow));
+		if (ShouldAllowBundleOption(owner))
+		{
+			AddOption(list, AccessTools.Property(neow.GetType(), "BundleOption")?.GetValue(neow));
+		}
+		if (playerCount > 1)
+		{
+			AddOption(list, AccessTools.Property(neow.GetType(), "ClericOption")?.GetValue(neow));
+		}
+		AddOption(list, AccessTools.Property(neow.GetType(), "PatienceOption")?.GetValue(neow));
+		AddOption(list, AccessTools.Property(neow.GetType(), "SafetyOption")?.GetValue(neow));
+		AddOption(list, AccessTools.Property(neow.GetType(), "ScavengerOption")?.GetValue(neow));
+		AddOption(list, AccessTools.Property(neow.GetType(), "ToughnessOption")?.GetValue(neow));
+		return list;
 	}
 
 	private static bool ShouldAllowBundleOption(object? owner)
@@ -423,6 +491,61 @@ internal static class EndlessModeNeowOptionsPatch
 	private static bool HasRelic(EventOption option, string relicTypeName)
 	{
 		return string.Equals(((object)option.Relic)?.GetType().Name, relicTypeName, StringComparison.Ordinal);
+	}
+
+	private static bool TryAcceptLoopedNeowOption(EventOption option, object? owner, int playerCount, out string reason)
+	{
+		reason = string.Empty;
+		if (option == null)
+		{
+			reason = "null-option";
+			return false;
+		}
+		if (HasRelic(option, "MassiveScroll") && (!GameReflection.IsMultiplayerRun() || playerCount <= 1))
+		{
+			reason = "singleplayer-empty-multiplayer-card-pool";
+			return false;
+		}
+		object? relic = option.Relic;
+		if (relic != null && owner != null)
+		{
+			MethodInfo? methodInfo = AccessTools.Method(relic.GetType(), "IsAllowedAtNeow", new Type[1] { owner.GetType() }, null) ?? AccessTools.Method(relic.GetType(), "IsAllowedAtNeow", new Type[1] { typeof(object) }, null) ?? AccessTools.Method(relic.GetType(), "IsAllowedAtNeow", (Type[])null, (Type[])null);
+			if (methodInfo != null)
+			{
+				try
+				{
+					object? obj = ((methodInfo.GetParameters().Length == 0) ? methodInfo.Invoke(relic, Array.Empty<object>()) : methodInfo.Invoke(relic, new object[1] { owner }));
+					if (obj is bool flag && !flag)
+					{
+						reason = "relic-not-allowed-at-neow";
+						return false;
+					}
+				}
+				catch (Exception ex)
+				{
+					reason = ex.GetType().Name + ": " + ex.Message;
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private static void LogLoopedOptionRemoved(EventOption option, string reason)
+	{
+		string text = AccessTools.Property(option.GetType(), "TextKey")?.GetValue(option)?.ToString() ?? "<null>";
+		string text2 = option.Relic?.GetType().Name ?? "<none>";
+		ModEntry.Logger.Info($"LoopedNeowOptionFilter removed option={text2} textKey={text} reason={reason}", 1);
+	}
+
+	private static void LogLoopedOptionFinal(IEnumerable<EventOption> options)
+	{
+		List<string> list = new List<string>();
+		foreach (EventOption option in options)
+		{
+			list.Add(AccessTools.Property(option.GetType(), "TextKey")?.GetValue(option)?.ToString() ?? "<null>");
+		}
+		ModEntry.Logger.Info($"LoopedNeowOptionFilter finalOptions=[{string.Join(", ", list)}]", 1);
 	}
 
 	private static object? ResolveNeowModel(object? source)

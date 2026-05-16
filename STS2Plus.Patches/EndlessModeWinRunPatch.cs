@@ -30,13 +30,13 @@ internal static class EndlessModeWinRunPatch
 		if (!GameReflection.IsMultiplayerRun())
 		{
 			ModEntry.Logger.Info("STS2Plus LOOP PATH: NATURAL_SINGLEPLAYER", 1);
-			ModEntry.Logger.Info("STS2Plus endless loop: intercepted RunManager.WinRun and starting legacy singleplayer endless transition.", 1);
+			ModEntry.Logger.Info("STS2Plus endless loop: fallback intercepted RunManager.WinRun after Architect/final scene and starting legacy singleplayer endless transition.", 1);
 			InWinTransition = false;
 			__result = GameReflection.TriggerLegacySingleplayerEndlessLoop(__instance, "NATURAL_SINGLEPLAYER") ?? Task.CompletedTask;
 			return false;
 		}
 		ModEntry.Logger.Info("STS2Plus LOOP PATH: MULTIPLAYER_HOST", 1);
-		ModEntry.Logger.Info("STS2Plus endless loop: intercepted RunManager.WinRun and starting local coordinator transition.", 1);
+		ModEntry.Logger.Info("STS2Plus endless loop: fallback intercepted RunManager.WinRun after Architect/final scene and starting local coordinator transition.", 1);
 		InWinTransition = true;
 		__result = EndlessLoopCoordinator.StartFromWinRunAsync(__instance);
 		return false;
